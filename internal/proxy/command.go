@@ -226,7 +226,6 @@ func writeJSONToolUse(w io.Writer, model, command string) {
 				"input": map[string]interface{}{
 					"command":     command,
 					"description": "Running command bridge",
-					"timeout":     600000,
 				},
 			},
 		},
@@ -265,7 +264,6 @@ func writeSSEToolUse(w io.Writer, model, command string) {
 	inputJSON, _ := json.Marshal(map[string]interface{}{
 		"command":     command,
 		"description": "Running command bridge",
-		"timeout":     600000,
 	})
 
 	events := []struct {

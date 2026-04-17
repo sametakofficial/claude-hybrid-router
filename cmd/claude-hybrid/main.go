@@ -5,13 +5,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
+	"strings"
 	"time"
 
 	"github.com/peter-wagstaff/claude-hybrid-router/internal/config"
@@ -19,33 +20,90 @@ import (
 	"github.com/peter-wagstaff/claude-hybrid-router/internal/proxy"
 )
 
+// ownFlags maps our proxy flags to whether they consume a value.
+// Anything not in this set is forwarded verbatim to claude, so users can
+// type `claude-hybrid --dangerously-skip-permissions /some/path` without
+// the `--` separator. `--` is still honored as an explicit end-of-own-
+// flags marker in case a claude flag name ever collides (e.g. --verbose).
+var ownFlagTakesValue = map[string]bool{
+	"port":          true,
+	"bind":          true,
+	"certs-dir":     true,
+	"proxy-only":    false,
+	"verbose":       false,
+	"require-trust": false,
+	"h":             false,
+	"help":          false,
+}
+
+// splitArgs separates process args into (ownArgs, claudeArgs). Known flags
+// from ownFlagTakesValue land in ownArgs (with their values); everything
+// else — including unknown --flags, bare positional args, and the tail
+// after `--` — is passed through to claude.
+func splitArgs(args []string) (own, claude []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			claude = append(claude, args[i+1:]...)
+			return
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			claude = append(claude, a)
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		value := ""
+		hasInlineValue := false
+		if idx := strings.Index(name, "="); idx >= 0 {
+			value = name[idx+1:]
+			name = name[:idx]
+			hasInlineValue = true
+		}
+		takesValue, known := ownFlagTakesValue[name]
+		if !known {
+			claude = append(claude, a)
+			continue
+		}
+		own = append(own, a)
+		if takesValue && !hasInlineValue {
+			if i+1 < len(args) {
+				i++
+				own = append(own, args[i])
+			}
+		}
+		_ = value
+	}
+	return
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "trust" {
 		os.Exit(runTrust(os.Args[2:]))
 	}
 
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, `Usage: claude-hybrid [proxy-flags] [-- claude-flags]
+	ownArgs, claudeArgs := splitArgs(os.Args[1:])
 
-Starts a local MITM routing proxy and launches Claude Code through it.
-Arguments after -- are passed directly to claude.
+	fs := flag.NewFlagSet("claude-hybrid", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
+	port := fs.Int("port", 0, "proxy listen port (0 = random)")
+	bind := fs.String("bind", "127.0.0.1", "proxy bind address")
+	certsDir := fs.String("certs-dir", defaultCertsDir(), "directory for CA cert/key")
+	proxyOnly := fs.Bool("proxy-only", false, "run proxy without launching claude")
+	verbose := fs.Bool("verbose", false, "enable verbose logging")
+	requireTrust := fs.Bool("require-trust", false, "abort if CA is not installed in the system trust store")
+	help := fs.Bool("help", false, "show claude-hybrid usage")
+	helpShort := fs.Bool("h", false, "show claude-hybrid usage")
 
-Examples:
-  claude-hybrid
-  claude-hybrid --verbose
-  claude-hybrid -- --dangerously-skip-permissions
-  claude-hybrid --verbose -- --dangerously-skip-permissions
-
-Proxy flags:
-`)
-		flag.PrintDefaults()
+	if err := fs.Parse(ownArgs); err != nil {
+		fmt.Fprintln(os.Stderr, "claude-hybrid:", err)
+		printUsage(fs)
+		os.Exit(2)
 	}
-	port := flag.Int("port", 0, "proxy listen port (0 = random)")
-	bind := flag.String("bind", "127.0.0.1", "proxy bind address")
-	certsDir := flag.String("certs-dir", defaultCertsDir(), "directory for CA cert/key")
-	proxyOnly := flag.Bool("proxy-only", false, "run proxy without launching claude")
-	verbose := flag.Bool("verbose", false, "enable verbose logging")
-	flag.Parse()
+	if *help || *helpShort {
+		printUsage(fs)
+		os.Exit(0)
+	}
 
 	// Ensure base directory exists
 	baseDir := filepath.Dir(*certsDir)
@@ -70,7 +128,13 @@ Proxy flags:
 	log.SetOutput(logFile)
 	log.SetPrefix(fmt.Sprintf("[%s] ", sessionID))
 
-	// Ensure certs directory exists
+	// Rotate any pre-existing certs dir whose schema predates the current
+	// code — on-disk CAs from older versions lack the extensions modern
+	// TLS clients require, so a silent reuse would reintroduce the very
+	// UNABLE_TO_VERIFY_LEAF_SIGNATURE errors we're fixing.
+	if err := invalidateIfStale(*certsDir, log.Printf); err != nil {
+		log.Fatalf("invalidate stale certs: %v", err)
+	}
 	if err := os.MkdirAll(*certsDir, 0700); err != nil {
 		log.Fatalf("create certs dir: %v", err)
 	}
@@ -79,14 +143,43 @@ Proxy flags:
 	if err != nil {
 		log.Fatalf("ensure CA: %v", err)
 	}
+	// Record the schema version after the CA is on disk so future runs
+	// know whether this install is current.
+	if err := writeSchemaVersion(*certsDir); err != nil {
+		log.Printf("warn: write schema version: %v", err)
+	}
 
-	// Load CA
+	// Startup self-check — catches cert template regressions before the
+	// child process hits them over TLS.
+	if err := verifyCertChain(certPEM, keyPEM); err != nil {
+		log.Fatalf("cert chain self-check failed: %v", err)
+	}
+
+	// Combined CA bundle (system roots + our CA) for tools that accept a
+	// single file via SSL_CERT_FILE / REQUESTS_CA_BUNDLE / etc.
+	bundlePath, err := ensureBundle(*certsDir, certPEM)
+	if err != nil {
+		log.Fatalf("ensure bundle: %v", err)
+	}
+
+	// Load CA into the in-memory cache.
 	certCache, err := mitm.NewCertCache(certPEM, keyPEM)
 	if err != nil {
 		log.Fatalf("create cert cache: %v", err)
 	}
-	if !systemTrustInstalled() {
-		log.Printf("CA is not installed in system trust store; run 'claude-hybrid trust install' for Python/pip compatibility")
+
+	// Trust-store advisory. NODE_EXTRA_CA_CERTS covers Claude Code's
+	// primary HTTPS paths; system trust is still needed for OAuth
+	// redirects, pip, curl, and any spawned subprocess that can't be
+	// told about our CA via env vars.
+	trusted := systemTrustHas(certPEM)
+	if !trusted {
+		msg := fmt.Sprintf("CA is not installed in the system trust store. OAuth, pip, and curl may fail. Run 'claude-hybrid trust install' (one-time, requires sudo) or pass --require-trust to hard-fail. CA path: %s", certPath)
+		if *requireTrust {
+			log.Fatalf("%s", msg)
+		}
+		log.Printf("warn: %s", msg)
+		fmt.Fprintln(os.Stderr, "claude-hybrid: "+msg)
 	}
 
 	// Load provider config (optional)
@@ -114,32 +207,30 @@ Proxy flags:
 		log.Fatalf("listen: %v", err)
 	}
 	proxyAddr := ln.Addr().String()
-	log.Printf("Proxy listening on %s", proxyAddr)
+	log.Printf("Proxy listening on %s (CA=%s, bundle=%s, systemTrust=%v)", proxyAddr, certPath, bundlePath, trusted)
 
 	srv := &http.Server{Handler: p}
 	go srv.Serve(ln)
 
 	if *proxyOnly {
 		log.Println("Running in proxy-only mode (Ctrl+C to stop)")
-		// Block forever (until signal kills us)
 		select {}
 	}
 
-	// Launch claude with proxy env vars
-	claudeArgs := flag.Args()
+	// Launch claude with proxy env vars. claudeArgs was already assembled
+	// from the pre-flag split; append any positional args our FlagSet
+	// picked up (unlikely, but harmless if someone passes e.g. a path
+	// after a value-less own flag). We do NOT rewrite or strip anything
+	// else — claude-hybrid is a transparent wrapper, so every arg claude
+	// would accept must reach it verbatim. Working directory follows the
+	// shell convention (cd /dir && claude-hybrid) exactly like claude.
+	claudeArgs = append(claudeArgs, fs.Args()...)
+
 	cmd := exec.Command("claude", claudeArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(),
-		"HTTPS_PROXY=http://"+proxyAddr,
-		"NODE_EXTRA_CA_CERTS="+certPath,
-		"NODE_USE_SYSTEM_CA=1",
-		"SSL_CERT_FILE="+systemCertBundlePath(),
-		"REQUESTS_CA_BUNDLE="+systemCertBundlePath(),
-		"CURL_CA_BUNDLE="+systemCertBundlePath(),
-		"PIP_CERT="+systemCertBundlePath(),
-	)
+	cmd.Env = buildChildEnv(proxyAddr, certPath, bundlePath)
 
 	shutdown := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -157,40 +248,42 @@ Proxy flags:
 	shutdown()
 }
 
+func printUsage(fs *flag.FlagSet) {
+	fmt.Fprint(os.Stderr, `Usage: claude-hybrid [proxy-flags] [claude-args...]
+
+Transparent wrapper around 'claude' that routes all HTTPS traffic through
+a local MITM proxy. Every arg claude accepts is forwarded verbatim. To
+open a project directory, use the same shell idiom as plain claude:
+
+    cd /path/to/project && claude-hybrid
+
+Unknown flags are forwarded to claude, so '--' is only needed when a
+claude flag name collides with ours (e.g. --verbose).
+
+Examples:
+  claude-hybrid
+  claude-hybrid --dangerously-skip-permissions
+  claude-hybrid --model opus --resume
+  cd ~/myproject && claude-hybrid
+  claude-hybrid --port 18900 --proxy-only
+  claude-hybrid -- --verbose          # forces --verbose onto claude
+
+Proxy flags:
+`)
+	fs.SetOutput(os.Stderr)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
+}
+
 // shouldTruncateLog returns true if the log file was last modified before today.
 func shouldTruncateLog(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
-		return false // file doesn't exist, will be created fresh
+		return false
 	}
 	now := time.Now()
 	modTime := info.ModTime()
 	return modTime.Year() != now.Year() || modTime.YearDay() != now.YearDay()
-}
-
-// tryTruncateLog truncates the log file while holding an exclusive lock,
-// preventing races between concurrent instances.
-func tryTruncateLog(path string) {
-	f, err := os.OpenFile(path, os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	// Try non-blocking exclusive lock — if another instance holds it, skip truncation
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return
-	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	// Re-check after acquiring lock (another instance may have already truncated)
-	info, err := f.Stat()
-	if err != nil {
-		return
-	}
-	now := time.Now()
-	modTime := info.ModTime()
-	if modTime.Year() != now.Year() || modTime.YearDay() != now.YearDay() {
-		f.Truncate(0)
-	}
 }
 
 func defaultCertsDir() string {
@@ -256,116 +349,4 @@ func ensureCA(certsDir string, logf func(string, ...interface{})) (certPath, key
 		}
 	}
 	return certPath, keyPath, certPEM, keyPEM, nil
-}
-
-func runTrust(args []string) int {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: claude-hybrid trust <install|status>")
-		return 2
-	}
-	certsDir := defaultCertsDir()
-	if err := os.MkdirAll(certsDir, 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "create cert dir: %v\n", err)
-		return 1
-	}
-	certPath, _, _, _, err := ensureCA(certsDir, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ensure CA: %v\n", err)
-		return 1
-	}
-
-	switch args[0] {
-	case "install":
-		if err := installTrust(certPath); err != nil {
-			fmt.Fprintf(os.Stderr, "install trust: %v\n", err)
-			return 1
-		}
-		fmt.Printf("Installed %s into system trust store.\n", certPath)
-		fmt.Printf("Use SSL_CERT_FILE=%s for tools that ignore system trust.\n", systemCertBundlePath())
-		return 0
-	case "status":
-		installed := systemTrustInstalled()
-		fmt.Printf("CA path: %s\n", certPath)
-		fmt.Printf("System trust: %v\n", installed)
-		if installed {
-			return 0
-		}
-		return 1
-	default:
-		fmt.Fprintf(os.Stderr, "unknown trust subcommand %q\n", args[0])
-		return 2
-	}
-}
-
-func installTrust(certPath string) error {
-	cmds := [][]string{{"trust", "anchor", certPath}, {"update-ca-trust"}}
-	for _, argv := range cmds {
-		if err := runElevated(argv...); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func runElevated(argv ...string) error {
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	if os.Geteuid() != 0 {
-		argv = append([]string{"sudo"}, argv...)
-		cmd = exec.Command(argv[0], argv[1:]...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Stdin = os.Stdin
-	}
-	return cmd.Run()
-}
-
-func systemTrustInstalled() bool {
-	out, err := exec.Command("trust", "list").CombinedOutput()
-	if err != nil {
-		return false
-	}
-	return containsIgnoreCase(string(out), "claude-hybrid MITM CA")
-}
-
-func containsIgnoreCase(s, needle string) bool {
-	if len(needle) == 0 {
-		return true
-	}
-	return len(s) >= len(needle) && containsFold(s, needle)
-}
-
-func containsFold(s, needle string) bool {
-	for i := 0; i+len(needle) <= len(s); i++ {
-		if equalFoldASCII(s[i:i+len(needle)], needle) {
-			return true
-		}
-	}
-	return false
-}
-
-func equalFoldASCII(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		ca := a[i]
-		cb := b[i]
-		if 'A' <= ca && ca <= 'Z' {
-			ca += 'a' - 'A'
-		}
-		if 'A' <= cb && cb <= 'Z' {
-			cb += 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
-}
-
-func systemCertBundlePath() string {
-	return "/etc/ssl/certs/ca-certificates.crt"
 }

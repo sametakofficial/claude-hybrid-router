@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -19,16 +20,23 @@ import (
 	"github.com/peter-wagstaff/claude-hybrid-router/internal/config"
 )
 
+// CertSchemaVersion is bumped whenever the on-disk CA template or
+// required leaf extensions change. The launcher rotates the certs dir
+// when it finds an older version file (or none at all) so users never
+// hit a stale-CA failure after an upgrade.
+const CertSchemaVersion = 2
+
 // CertCache generates and caches per-domain TLS certificates signed by a MITM CA.
 type CertCache struct {
 	caCert   *x509.Certificate
+	caDER    []byte
 	caKey    *ecdsa.PrivateKey
 	maxSize  int
 	validity time.Duration
 
 	mu    sync.Mutex
 	cache map[string]*list.Element
-	order *list.List // LRU: front = most recently used
+	order *list.List
 }
 
 type cacheEntry struct {
@@ -54,7 +62,6 @@ func NewCertCache(caCertPEM, caKeyPEM []byte) (*CertCache, error) {
 	}
 	rawKey, err := x509.ParseECPrivateKey(keyBlock.Bytes)
 	if err != nil {
-		// Try PKCS8
 		k, err2 := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
 		if err2 != nil {
 			return nil, fmt.Errorf("parse CA key: %w", err)
@@ -68,6 +75,7 @@ func NewCertCache(caCertPEM, caKeyPEM []byte) (*CertCache, error) {
 
 	return &CertCache{
 		caCert:   caCert,
+		caDER:    certBlock.Bytes,
 		caKey:    rawKey,
 		maxSize:  config.MitmCacheMaxSize,
 		validity: time.Duration(config.MitmCertValidityHours * float64(time.Hour)),
@@ -76,8 +84,14 @@ func NewCertCache(caCertPEM, caKeyPEM []byte) (*CertCache, error) {
 	}, nil
 }
 
+// CACertificate returns the parsed CA certificate. Callers must not mutate it.
+func (c *CertCache) CACertificate() *x509.Certificate { return c.caCert }
+
 // GetTLSConfig returns a *tls.Config with a certificate for the given hostname.
-// Results are cached with LRU eviction.
+// Results are cached with LRU eviction. The returned tls.Certificate carries
+// both the leaf and the CA DER so clients receive a complete chain during the
+// handshake — Node.js / undici refuse single-cert responses with
+// UNABLE_TO_VERIFY_LEAF_SIGNATURE even when the root is trusted out of band.
 func (c *CertCache) GetTLSConfig(hostname string) (*tls.Config, error) {
 	c.mu.Lock()
 	if el, ok := c.cache[hostname]; ok {
@@ -86,13 +100,8 @@ func (c *CertCache) GetTLSConfig(hostname string) (*tls.Config, error) {
 			c.order.MoveToFront(el)
 			cert := entry.cert
 			c.mu.Unlock()
-			return &tls.Config{
-				Certificates: []tls.Certificate{cert},
-				MinVersion:   tls.VersionTLS13,
-				NextProtos:   []string{"http/1.1"},
-			}, nil
+			return c.tlsConfig(cert), nil
 		}
-		// Expired
 		c.order.Remove(el)
 		delete(c.cache, hostname)
 	}
@@ -114,11 +123,15 @@ func (c *CertCache) GetTLSConfig(hostname string) (*tls.Config, error) {
 	}
 	c.mu.Unlock()
 
+	return c.tlsConfig(cert), nil
+}
+
+func (c *CertCache) tlsConfig(cert tls.Certificate) *tls.Config {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS13,
 		NextProtos:   []string{"http/1.1"},
-	}, nil
+	}
 }
 
 func (c *CertCache) generateCert(hostname string) (tls.Certificate, error) {
@@ -133,10 +146,15 @@ func (c *CertCache) generateCert(hostname string) (tls.Certificate, error) {
 	}
 
 	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: hostname},
-		NotBefore:    time.Now().Add(-1 * time.Hour),
-		NotAfter:     time.Now().Add(c.validity),
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: hostname},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(c.validity),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		AuthorityKeyId:        c.caCert.SubjectKeyId,
 	}
 
 	if ip := net.ParseIP(hostname); ip != nil {
@@ -145,22 +163,35 @@ func (c *CertCache) generateCert(hostname string) (tls.Certificate, error) {
 		tmpl.DNSNames = []string{hostname}
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, c.caCert, &key.PublicKey, c.caKey)
+	leafDER, err := x509.CreateCertificate(rand.Reader, tmpl, c.caCert, &key.PublicKey, c.caKey)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
 
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	keyDER, err := x509.MarshalECPrivateKey(key)
+	leaf, err := x509.ParseCertificate(leafDER)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
-	return tls.X509KeyPair(certPEM, keyPEM)
+	// Intentionally ship only the leaf (no CA in chain). A self-signed CA in
+	// the presented chain triggers SELF_SIGNED_CERT_IN_CHAIN on clients that
+	// haven't been told the CA is a trust anchor (Node/undici, strict
+	// OpenSSL modes) — even when those clients DO trust the CA out of band
+	// via NODE_EXTRA_CA_CERTS. mitmproxy / Charles / Proxyman all follow the
+	// same pattern: leaf-only, let the client resolve the issuer from its
+	// trust store. The caDER is still kept for possible future use (e.g.
+	// stapled OCSP responses or a debug chain endpoint).
+	_ = c.caDER
+	return tls.Certificate{
+		Certificate: [][]byte{leafDER},
+		PrivateKey:  key,
+		Leaf:        leaf,
+	}, nil
 }
 
 // GenerateCA creates a self-signed CA certificate and key, returned as PEM bytes.
+// The CA carries a proper SubjectKeyId derived from SHA-1(SPKI) (RFC 5280
+// §4.2.1.2 recommended method) and the extensions modern TLS validators expect.
 func GenerateCA() (certPEM, keyPEM []byte, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -172,15 +203,27 @@ func GenerateCA() (certPEM, keyPEM []byte, err error) {
 		return nil, nil, err
 	}
 
+	spki, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	skid := sha1.Sum(spki)
+
 	tmpl := &x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "claude-hybrid MITM CA"},
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:   "claude-hybrid MITM CA",
+			Organization: []string{"claude-hybrid"},
+		},
 		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().Add(5 * 365 * 24 * time.Hour),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
 		IsCA:                  true,
 		BasicConstraintsValid: true,
+		MaxPathLen:            0,
+		MaxPathLenZero:        true,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		SubjectKeyId:          []byte{1}, // Simplified; fine for local use
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		SubjectKeyId:          skid[:],
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
