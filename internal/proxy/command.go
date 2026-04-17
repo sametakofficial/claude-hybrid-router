@@ -16,27 +16,62 @@ import (
 //
 // Turn 1 (no tool_result): Substitutes $AGENT/$PROMPT into the command
 //
-//	template and returns a tool_use response (Bash).
+//	template and returns a tool_use response (Bash). For `opencode run`
+//	bridges we additionally force --format json and, when available,
+//	inject --session <id> so the subagent resumes its prior conversation
+//	instead of starting fresh every turn.
 //
-// Turn 2 (has tool_result): Returns the tool result content as text.
+// Turn 2 (has tool_result): For opencode runs we parse the JSON event
+// stream to capture the newly emitted sessionID (cached for next time)
+// and to extract just the assistant text. For other bridges we return
+// the raw tool output verbatim.
 func (p *Proxy) forwardCommand(w io.Writer, command, agentName, modelLabel string, body []byte, isStreaming bool) {
+	opencode := isOpencodeRun(command)
 	if hasToolResult(body) {
 		toolOutput := extractToolResult(body)
-		log.Printf("COMMAND_TURN2 %s → returning tool result as text (%d chars)", modelLabel, len(toolOutput))
-		if isStreaming {
-			writeSSEText(w, modelLabel, toolOutput)
+		displayText := toolOutput
+		if opencode {
+			sessionID, text := parseOpencodeOutput(toolOutput)
+			if sessionID != "" {
+				defaultOpencodeSessions.Set(agentName, sessionID)
+				log.Printf("COMMAND_TURN2 %s → cached opencode session %s (text=%d chars)", modelLabel, sessionID, len(text))
+			} else {
+				log.Printf("COMMAND_TURN2 %s → no sessionID in opencode output (text=%d chars)", modelLabel, len(text))
+			}
+			if text != "" {
+				displayText = text
+			}
 		} else {
-			writeJSONTextResponse(w, modelLabel, toolOutput)
+			log.Printf("COMMAND_TURN2 %s → returning tool result as text (%d chars)", modelLabel, len(displayText))
+		}
+		if isStreaming {
+			writeSSEText(w, modelLabel, displayText)
+		} else {
+			writeJSONTextResponse(w, modelLabel, displayText)
+		}
+		return
+	}
+
+	prompt := extractPrompt(body)
+	cmd := expandCommand(command, agentName, prompt)
+	resumedFrom := ""
+	if opencode {
+		resumedFrom = defaultOpencodeSessions.Get(agentName)
+		cmd = rewriteOpencodeCommand(cmd, resumedFrom)
+	}
+	if opencode {
+		if resumedFrom != "" {
+			log.Printf("COMMAND_TURN1 %s → opencode resume=%s Bash: %s", modelLabel, resumedFrom, truncate(cmd, 240))
+		} else {
+			log.Printf("COMMAND_TURN1 %s → opencode new session Bash: %s", modelLabel, truncate(cmd, 240))
 		}
 	} else {
-		prompt := extractPrompt(body)
-		cmd := expandCommand(command, agentName, prompt)
 		log.Printf("COMMAND_TURN1 %s → Bash: %s", modelLabel, truncate(cmd, 200))
-		if isStreaming {
-			writeSSEToolUse(w, modelLabel, cmd)
-		} else {
-			writeJSONToolUse(w, modelLabel, cmd)
-		}
+	}
+	if isStreaming {
+		writeSSEToolUse(w, modelLabel, cmd)
+	} else {
+		writeJSONToolUse(w, modelLabel, cmd)
 	}
 }
 
