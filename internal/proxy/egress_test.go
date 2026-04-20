@@ -231,37 +231,9 @@ func TestEgressForwardsStructuredErrorBody(t *testing.T) {
 	}
 }
 
-func TestEgressAgentHeader(t *testing.T) {
-	srv, port, _, getHeaders, err := testutil.MockMusistudioServer()
-	if err != nil {
-		t.Fatalf("mock egress: %v", err)
-	}
-	t.Cleanup(func() { srv.Close() })
-
-	resolver := makeRouteResolver(t)
-	infra := setupInfra(t, resolver)
-
-	marker := fmt.Sprintf("<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:%d agent=simplifier -->", port)
-	body, _ := json.Marshal(map[string]interface{}{
-		"model":    "claude-sonnet-4-20250514",
-		"system":   marker + " You are helpful",
-		"messages": []map[string]string{{"role": "user", "content": "hello"}},
-	})
-
-	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
-	if status != 200 {
-		t.Fatalf("expected 200, got %d: %s", status, respBody)
-	}
-
-	headers := getHeaders()
-	if headers == nil {
-		t.Fatal("egress got no request")
-	}
-	got := headers.Get("X-Agent-Name")
-	if got != "simplifier" {
-		t.Errorf("expected X-Agent-Name=simplifier, got %q", got)
-	}
-}
+// TestEgressAgentHeader was removed: the proxy is now a pure URL forwarder
+// and carries no knowledge of agents. Agent name detection belongs to the
+// service behind the URL (e.g. opencode-bridge).
 
 func TestEgressBodyPassedAsIs(t *testing.T) {
 	srv, port, getBody, _, err := testutil.MockMusistudioServer()

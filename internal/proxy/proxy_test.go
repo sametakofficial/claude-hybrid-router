@@ -215,7 +215,14 @@ func TestLocalRouteMarkerStripped(t *testing.T) {
 	}
 }
 
-func TestMarkerInMessagesNotRouted(t *testing.T) {
+// TestMarkerInMessagesIsRouted verifies that markers inside user messages
+// ARE routed locally. Claude Code packages CLAUDE.md content as
+// <system-reminder> blocks inside user messages (not in the top-level
+// `system` field), so the proxy must pick up markers there too.
+// With no routeResolver configured, forwardLocal returns the local-stub
+// response whose body contains the intercept notice — its presence
+// proves routing happened and the request never hit the upstream echo.
+func TestMarkerInMessagesIsRouted(t *testing.T) {
 	infra := setupInfra(t, nil)
 
 	body, _ := json.Marshal(map[string]interface{}{
@@ -226,18 +233,10 @@ func TestMarkerInMessagesNotRouted(t *testing.T) {
 	})
 	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
 	if status != 200 {
-		t.Fatalf("expected 200, got %d", status)
+		t.Fatalf("expected 200 stub response, got %d: %s", status, respBody)
 	}
-
-	var echo testutil.EchoResponse
-	if err := json.Unmarshal([]byte(respBody), &echo); err != nil {
-		t.Fatalf("parse echo response: %v", err)
-	}
-	if echo.Method != "POST" {
-		t.Error("should be forwarded, not intercepted")
-	}
-	if !strings.Contains(echo.Body, "@proxy-local-route") {
-		t.Error("marker should be in forwarded body")
+	if !strings.Contains(respBody, "intercepted by proxy") {
+		t.Errorf("expected local stub response, got: %s", respBody)
 	}
 }
 

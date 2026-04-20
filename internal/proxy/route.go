@@ -8,12 +8,17 @@ import (
 	"strings"
 )
 
-var routeMarkerRE = regexp.MustCompile(`<!-- @proxy-local-route:af83e9 url=(\S+)(?:\s+agent=(\S+))? -->`)
+// Matches both HTML-comment-wrapped and bare forms so the marker survives
+// markdown parsers that strip HTML comments (e.g. Claude Code's CLAUDE.md/agent loader).
+//
+// The proxy is a pure URL forwarder — it extracts only the URL. Any service
+// behind that URL (e.g. opencode-bridge) is responsible for parsing its own
+// metadata (agent name, etc.) from the request body.
+var routeMarkerRE = regexp.MustCompile(`(?:<!--\s*)?@proxy-local-route:af83e9\s+url=(\S+?)(?:\s*-->)?(?:\s|$)`)
 
 // RouteDirective holds the parsed fields from a routing marker.
 type RouteDirective struct {
-	Route string // route name from config (e.g. "fast", "local")
-	Agent string // optional; e.g. "simplifier"
+	Route string // destination base URL (e.g. "http://127.0.0.1:4568")
 }
 
 // detectLocalRoute checks the system field of a JSON body for a routing marker.
@@ -29,20 +34,66 @@ func detectLocalRoute(body []byte) (route RouteDirective, stripped []byte) {
 		return RouteDirective{}, body
 	}
 
-	system, ok := data["system"]
-	if !ok || system == nil {
-		return RouteDirective{}, body
+	// Check system field first (traditional placement).
+	if system, ok := data["system"]; ok && system != nil {
+		if route, stripped, found := scanSystemField(data, system); found {
+			return route, stripped
+		}
 	}
 
+	// Claude Code packages CLAUDE.md and agent markdown as a USER message
+	// with <system-reminder> blocks, so the marker lands in
+	// messages[].content[].text rather than the top-level system field.
+	// Scan every user message's text blocks as a fallback.
+	if messages, ok := data["messages"].([]interface{}); ok {
+		for _, msg := range messages {
+			mm, ok := msg.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if role, _ := mm["role"].(string); role != "user" {
+				continue
+			}
+			content := mm["content"]
+			switch c := content.(type) {
+			case string:
+				if m := routeMarkerRE.FindStringSubmatch(c); m != nil {
+					mm["content"] = strings.TrimSpace(routeMarkerRE.ReplaceAllString(c, ""))
+					out, _ := json.Marshal(data)
+					return RouteDirective{Route: m[1]}, out
+				}
+			case []interface{}:
+				for _, block := range c {
+					bm, ok := block.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					text, ok := bm["text"].(string)
+					if !ok {
+						continue
+					}
+					if m := routeMarkerRE.FindStringSubmatch(text); m != nil {
+						bm["text"] = strings.TrimSpace(routeMarkerRE.ReplaceAllString(text, ""))
+						out, _ := json.Marshal(data)
+						return RouteDirective{Route: m[1]}, out
+					}
+				}
+			}
+		}
+	}
+
+	return RouteDirective{}, body
+}
+
+// scanSystemField checks the system field (string or block array) for the
+// routing marker. If found, strips the marker and returns the re-marshaled body.
+func scanSystemField(data map[string]interface{}, system interface{}) (RouteDirective, []byte, bool) {
 	switch s := system.(type) {
 	case string:
-		m := routeMarkerRE.FindStringSubmatch(s)
-		if m != nil {
-			cleaned := routeMarkerRE.ReplaceAllString(s, "")
-			// Trim leading/trailing whitespace left by marker removal
-			data["system"] = strings.TrimSpace(cleaned)
+		if m := routeMarkerRE.FindStringSubmatch(s); m != nil {
+			data["system"] = strings.TrimSpace(routeMarkerRE.ReplaceAllString(s, ""))
 			out, _ := json.Marshal(data)
-			return RouteDirective{Route: m[1], Agent: m[2]}, out
+			return RouteDirective{Route: m[1]}, out, true
 		}
 	case []interface{}:
 		for _, block := range s {
@@ -54,16 +105,14 @@ func detectLocalRoute(body []byte) (route RouteDirective, stripped []byte) {
 			if !ok {
 				continue
 			}
-			m := routeMarkerRE.FindStringSubmatch(text)
-			if m != nil {
+			if m := routeMarkerRE.FindStringSubmatch(text); m != nil {
 				bm["text"] = strings.TrimSpace(routeMarkerRE.ReplaceAllString(text, ""))
 				out, _ := json.Marshal(data)
-				return RouteDirective{Route: m[1], Agent: m[2]}, out
+				return RouteDirective{Route: m[1]}, out, true
 			}
 		}
 	}
-
-	return RouteDirective{}, body
+	return RouteDirective{}, nil, false
 }
 
 

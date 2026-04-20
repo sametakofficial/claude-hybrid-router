@@ -17,9 +17,6 @@ func TestDetectLocalRoute_StringSystem(t *testing.T) {
 	if route.Route != "http://localhost:3456" {
 		t.Fatalf("expected http://localhost:3456, got %q", route.Route)
 	}
-	if route.Agent != "" {
-		t.Fatalf("expected empty agent, got %q", route.Agent)
-	}
 
 	var data map[string]interface{}
 	json.Unmarshal(stripped, &data)
@@ -66,6 +63,10 @@ func TestDetectLocalRoute_NoMarker(t *testing.T) {
 	}
 }
 
+// TestDetectLocalRoute_MarkerInMessages verifies that markers in user
+// messages ARE detected. Claude Code packages CLAUDE.md content as
+// <system-reminder> blocks inside user messages (not in the top-level
+// `system` field), so the marker must be picked up there too.
 func TestDetectLocalRoute_MarkerInMessages(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"messages": []map[string]string{{
@@ -75,11 +76,14 @@ func TestDetectLocalRoute_MarkerInMessages(t *testing.T) {
 	})
 
 	route, stripped := detectLocalRoute(body)
-	if route.Route != "" {
-		t.Fatalf("should not detect marker in messages, got %q", route.Route)
+	if route.Route != "http://localhost:3456" {
+		t.Fatalf("expected route=http://localhost:3456, got %q", route.Route)
 	}
-	if !bytes.Equal(stripped, body) {
-		t.Error("body should be unchanged")
+	if bytes.Equal(stripped, body) {
+		t.Error("body should have marker stripped")
+	}
+	if bytes.Contains(stripped, []byte("@proxy-local-route")) {
+		t.Error("stripped body still contains marker")
 	}
 }
 
@@ -98,53 +102,6 @@ func TestDetectLocalRoute_EmptyBody(t *testing.T) {
 	route, stripped := detectLocalRoute(nil)
 	if route.Route != "" || stripped != nil {
 		t.Error("expected nil passthrough")
-	}
-}
-
-func TestDetectLocalRoute_WithAgent(t *testing.T) {
-	body, _ := json.Marshal(map[string]interface{}{
-		"system":   "<!-- @proxy-local-route:af83e9 url=http://localhost:4567 agent=simplifier --> You are helpful",
-		"messages": []map[string]string{{"role": "user", "content": "hi"}},
-	})
-
-	route, stripped := detectLocalRoute(body)
-	if route.Route != "http://localhost:4567" {
-		t.Fatalf("expected url=http://localhost:4567, got %q", route.Route)
-	}
-	if route.Agent != "simplifier" {
-		t.Fatalf("expected agent=simplifier, got %q", route.Agent)
-	}
-
-	var data map[string]interface{}
-	json.Unmarshal(stripped, &data)
-	sys := data["system"].(string)
-	if sys != "You are helpful" {
-		t.Errorf("expected stripped system, got %q", sys)
-	}
-}
-
-func TestDetectLocalRoute_WithAgentListSystem(t *testing.T) {
-	body, _ := json.Marshal(map[string]interface{}{
-		"system": []map[string]string{
-			{"type": "text", "text": "<!-- @proxy-local-route:af83e9 url=http://localhost:4567 agent=reviewer --> Instructions"},
-		},
-		"messages": []map[string]string{{"role": "user", "content": "hi"}},
-	})
-
-	route, stripped := detectLocalRoute(body)
-	if route.Route != "http://localhost:4567" {
-		t.Fatalf("expected url=http://localhost:4567, got %q", route.Route)
-	}
-	if route.Agent != "reviewer" {
-		t.Fatalf("expected agent=reviewer, got %q", route.Agent)
-	}
-
-	var data map[string]interface{}
-	json.Unmarshal(stripped, &data)
-	blocks := data["system"].([]interface{})
-	text := blocks[0].(map[string]interface{})["text"].(string)
-	if text != "Instructions" {
-		t.Errorf("expected stripped text, got %q", text)
 	}
 }
 

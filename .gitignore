@@ -8,8 +8,13 @@ certs/
 
 # Go
 /claude-hybrid
+/opencode-bridge
 coverage.out
 SPEC.md
+
+# Research / corpus artifacts (transient, not part of the shipped project)
+/clean_corpus/
+/research_urls/
 
 # musistudio egress runtime artifacts (created by the container on first run)
 /deploy/musistudio-config/logs/

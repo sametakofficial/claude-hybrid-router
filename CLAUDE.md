@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Local MITM routing proxy for Claude Code. Sits between Claude Code (subscription) and Anthropic's API, intercepts HTTPS traffic via CONNECT + MITM TLS, detects a routing marker in the `system` field of Claude API requests, and either routes to a local/alternative model via OpenAI-compatible API or forwards unmodified to Anthropic.
 
-**Routing marker format:** `<!-- @proxy-local-route:af83e9 model=MODEL_LABEL -->`
+**Routing marker format:** `<!-- @proxy-local-route:af83e9 url=BASE_URL -->`
+
+<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:3456 -->
 
 Only the `system` field is checked for the marker — never `messages`. This prevents contamination if an agent quotes another agent's system prompt.
 

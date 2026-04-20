@@ -226,11 +226,20 @@ func main() {
 	// shell convention (cd /dir && claude-hybrid) exactly like claude.
 	claudeArgs = append(claudeArgs, fs.Args()...)
 
+	childEnv := buildChildEnv(proxyAddr, certPath, bundlePath)
+	// Debug: print the base URL being set
+	for _, e := range childEnv {
+		if strings.HasPrefix(e, "ANTHROPIC_BASE_URL=") {
+			fmt.Fprintf(os.Stderr, "claude-hybrid: %s\n", e)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "claude-hybrid: launching claude %v\n", claudeArgs)
+
 	cmd := exec.Command("claude", claudeArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = buildChildEnv(proxyAddr, certPath, bundlePath)
+	cmd.Env = childEnv
 
 	shutdown := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

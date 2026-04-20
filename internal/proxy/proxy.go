@@ -227,12 +227,8 @@ func (p *Proxy) handleTunnel(tlsConn net.Conn, host, port string) {
 			if json.Unmarshal(body, &reqMeta) == nil && reqMeta.Stream {
 				streamMode = "streaming"
 			}
-			agentTag := ""
-			if route.Agent != "" {
-				agentTag = fmt.Sprintf(" agent=%s", route.Agent)
-			}
-			log.Printf("LOCAL_ROUTE %s https://%s:%s%s → route=%s%s (%s)",
-				req.Method, host, port, req.URL.RequestURI(), route.Route, agentTag, streamMode)
+			log.Printf("LOCAL_ROUTE %s https://%s:%s%s → route=%s (%s)",
+				req.Method, host, port, req.URL.RequestURI(), route.Route, streamMode)
 
 			p.forwardLocal(tlsConn, route, strippedBody)
 		} else {
@@ -418,9 +414,6 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte) {
 		}
 		localReq.Header.Set("Content-Type", "application/json")
 		localReq.Header.Set("anthropic-version", "2023-06-01")
-		if route.Agent != "" {
-			localReq.Header.Set("X-Agent-Name", route.Agent)
-		}
 
 		resp, err := p.localClient.Do(localReq)
 		if err != nil {
