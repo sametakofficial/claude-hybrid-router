@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,12 +37,14 @@ func (mc *ModelConfig) UnmarshalYAML(value *yaml.Node) error {
 // Endpoint is kept so a non-default musistudio instance (e.g. remote host) or a
 // plain command bridge stanza can coexist with the default local 3456 server.
 type ProviderConfig struct {
-	Name      string                 `yaml:"name"`
-	Endpoint  string                 `yaml:"endpoint,omitempty"` // musistudio URL; empty = use global Egress.URL
-	Command   string                 `yaml:"command,omitempty"`  // shell command template; skips endpoint entirely
-	APIKey    string                 `yaml:"api_key,omitempty"`
-	MaxTokens int                    `yaml:"max_tokens,omitempty"`
-	Models    map[string]ModelConfig `yaml:"models"` // label → backend model name or config
+	Name         string                 `yaml:"name"`
+	Endpoint     string                 `yaml:"endpoint,omitempty"` // musistudio URL; empty = use global Egress.URL
+	Command      string                 `yaml:"command,omitempty"`  // shell command template; skips endpoint entirely
+	APIKey       string                 `yaml:"api_key,omitempty"`
+	MaxTokens    int                    `yaml:"max_tokens,omitempty"`
+	Default      bool                   `yaml:"default,omitempty"`
+	DefaultModel string                 `yaml:"default_model,omitempty"`
+	Models       map[string]ModelConfig `yaml:"models"` // label → backend model name or config
 }
 
 // EgressConfig configures the shared musistudio egress endpoint.
@@ -76,10 +79,12 @@ type ResolvedModel struct {
 
 // ModelResolver resolves model labels to provider details.
 type ModelResolver struct {
-	models       map[string]ResolvedModel
-	systemPrompt string        // if set, replaces the system field in routed requests
-	reminder     string        // if set, injected into tool_result messages as <system-reminder>
-	timeout      time.Duration // time to wait for first response byte from egress
+	models         map[string]ResolvedModel
+	defaultModel   *ResolvedModel            // provider with default: true
+	commandBridges map[string]string          // provider-name → command template
+	systemPrompt   string                    // if set, replaces the system field in routed requests
+	reminder       string                    // if set, injected into tool_result messages as <system-reminder>
+	timeout        time.Duration             // time to wait for first response byte from egress
 }
 
 var envVarRE = regexp.MustCompile(`\$\{([^}]+)\}`)
@@ -117,6 +122,9 @@ func NewModelResolver(cfg *ProvidersConfig) (*ModelResolver, error) {
 	globalKey := expandEnvVars(cfg.Egress.APIKey)
 
 	models := make(map[string]ResolvedModel)
+	var defaultModel *ResolvedModel
+	commandBridges := make(map[string]string)
+
 	for _, p := range cfg.Providers {
 		if p.Name == "" {
 			return nil, fmt.Errorf("provider missing name")
@@ -130,6 +138,11 @@ func NewModelResolver(cfg *ProvidersConfig) (*ModelResolver, error) {
 		if apiKey == "" {
 			apiKey = globalKey
 		}
+
+		if p.Command != "" {
+			commandBridges[p.Name] = p.Command
+		}
+
 		for label, mc := range p.Models {
 			if _, exists := models[label]; exists {
 				return nil, fmt.Errorf("duplicate model label %q", label)
@@ -154,6 +167,27 @@ func NewModelResolver(cfg *ProvidersConfig) (*ModelResolver, error) {
 				Label:     label,
 				Provider:  p.Name,
 				MaxTokens: maxTokens,
+			}
+		}
+
+		if p.Default && defaultModel == nil {
+			targetLabel := p.DefaultModel
+			if targetLabel == "" {
+				// First alphabetically
+				labels := make([]string, 0, len(p.Models))
+				for l := range p.Models {
+					labels = append(labels, l)
+				}
+				sort.Strings(labels)
+				if len(labels) > 0 {
+					targetLabel = labels[0]
+				}
+			}
+			if targetLabel != "" {
+				if dm, ok := models[targetLabel]; ok {
+					dm.Label = "direct"
+					defaultModel = &dm
+				}
 			}
 		}
 	}
@@ -192,7 +226,14 @@ func NewModelResolver(cfg *ProvidersConfig) (*ModelResolver, error) {
 		timeout = UpstreamTimeout
 	}
 
-	return &ModelResolver{models: models, systemPrompt: systemPrompt, reminder: reminder, timeout: timeout}, nil
+	return &ModelResolver{
+		models:         models,
+		defaultModel:   defaultModel,
+		commandBridges: commandBridges,
+		systemPrompt:   systemPrompt,
+		reminder:       reminder,
+		timeout:        timeout,
+	}, nil
 }
 
 // SystemPrompt returns the system prompt override text, or "" if not configured.
@@ -217,4 +258,28 @@ func (r *ModelResolver) Resolve(label string) (ResolvedModel, error) {
 		return ResolvedModel{}, fmt.Errorf("unknown model label %q", label)
 	}
 	return m, nil
+}
+
+// ResolveDefault returns the model marked as default (provider with default: true).
+func (r *ModelResolver) ResolveDefault() (ResolvedModel, error) {
+	if r.defaultModel == nil {
+		return ResolvedModel{}, fmt.Errorf("no default provider configured (set default: true)")
+	}
+	return *r.defaultModel, nil
+}
+
+// ResolveCommand builds a ResolvedModel for a command bridge provider with a
+// dynamic agent name. The agent is stored in Model so the command template can
+// substitute $AGENT at execution time.
+func (r *ModelResolver) ResolveCommand(providerName, agentName string) (ResolvedModel, error) {
+	cmd, ok := r.commandBridges[providerName]
+	if !ok {
+		return ResolvedModel{}, fmt.Errorf("no command bridge provider %q", providerName)
+	}
+	return ResolvedModel{
+		Command:  cmd,
+		Model:    agentName,
+		Label:    providerName,
+		Provider: providerName,
+	}, nil
 }

@@ -211,3 +211,107 @@ providers:
 	}
 }
 
+func TestResolveDefault(t *testing.T) {
+	_, r := loadTestConfig(t, `
+providers:
+  - name: gpt
+    default: true
+    default_model: chat
+    models:
+      chat: gpt-5.4-medium-fast
+      fast: gpt-5.4-low-fast
+`)
+	dm, err := r.ResolveDefault()
+	if err != nil {
+		t.Fatalf("ResolveDefault: %v", err)
+	}
+	if dm.Label != "direct" {
+		t.Errorf("expected label=direct, got %q", dm.Label)
+	}
+	if dm.Model != "gpt,gpt-5.4-medium-fast" {
+		t.Errorf("expected model=gpt,gpt-5.4-medium-fast, got %q", dm.Model)
+	}
+}
+
+func TestResolveDefaultNoConfig(t *testing.T) {
+	_, r := loadTestConfig(t, `
+providers:
+  - name: gpt
+    models:
+      chat: gpt-5.4-medium-fast
+`)
+	_, err := r.ResolveDefault()
+	if err == nil {
+		t.Error("expected error when no default provider configured")
+	}
+}
+
+func TestResolveDefaultFirstAlphabetically(t *testing.T) {
+	_, r := loadTestConfig(t, `
+providers:
+  - name: gpt
+    default: true
+    models:
+      zebra: model-z
+      alpha: model-a
+`)
+	dm, err := r.ResolveDefault()
+	if err != nil {
+		t.Fatalf("ResolveDefault: %v", err)
+	}
+	// "alpha" is first alphabetically
+	if dm.Model != "gpt,model-a" {
+		t.Errorf("expected first-alphabetically model, got %q", dm.Model)
+	}
+}
+
+func TestResolveCommand(t *testing.T) {
+	_, r := loadTestConfig(t, `
+providers:
+  - name: opencode
+    command: "opencode run --agent $AGENT --format default '$PROMPT'"
+`)
+	rm, err := r.ResolveCommand("opencode", "simplifier")
+	if err != nil {
+		t.Fatalf("ResolveCommand: %v", err)
+	}
+	if rm.Command != "opencode run --agent $AGENT --format default '$PROMPT'" {
+		t.Errorf("unexpected command: %s", rm.Command)
+	}
+	if rm.Model != "simplifier" {
+		t.Errorf("expected model=simplifier (agent name), got %q", rm.Model)
+	}
+	if rm.Provider != "opencode" {
+		t.Errorf("expected provider=opencode, got %q", rm.Provider)
+	}
+}
+
+func TestResolveCommandUnknownProvider(t *testing.T) {
+	_, r := loadTestConfig(t, `
+providers:
+  - name: gpt
+    models:
+      chat: gpt-5
+`)
+	_, err := r.ResolveCommand("opencode", "simplifier")
+	if err == nil {
+		t.Error("expected error for unknown command bridge provider")
+	}
+}
+
+func TestCommandBridgeNoModelsRequired(t *testing.T) {
+	// A command bridge provider with no models section should still register its command.
+	_, r := loadTestConfig(t, `
+providers:
+  - name: opencode
+    command: "opencode run --agent $AGENT '$PROMPT'"
+`)
+	rm, err := r.ResolveCommand("opencode", "test-agent")
+	if err != nil {
+		t.Fatalf("ResolveCommand: %v", err)
+	}
+	if rm.Model != "test-agent" {
+		t.Errorf("expected model=test-agent, got %q", rm.Model)
+	}
+}
+

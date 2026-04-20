@@ -205,21 +205,21 @@ func (p *Proxy) handleTunnel(tlsConn net.Conn, host, port string) {
 		// Reset deadline for each request
 		tlsConn.SetDeadline(deadlineFromNow(config.ClientRecvTimeout))
 
-		routeModel, strippedBody := detectLocalRoute(body)
+		route, strippedBody := detectLocalRoute(body)
 
 		// System prompt override: replace the system field before forwarding.
-		if routeModel != "" && p.modelResolver != nil && p.modelResolver.SystemPrompt() != "" &&
+		if route.Model != "" && p.modelResolver != nil && p.modelResolver.SystemPrompt() != "" &&
 			req.Method == "POST" {
 			strippedBody = rewriteSystemPrompt(strippedBody, p.modelResolver.SystemPrompt())
 		}
 
 		// Reminder injection: append <system-reminder> to messages containing tool_result.
-		if routeModel != "" && p.modelResolver != nil && p.modelResolver.Reminder() != "" &&
+		if route.Model != "" && p.modelResolver != nil && p.modelResolver.Reminder() != "" &&
 			req.Method == "POST" {
 			strippedBody = injectReminder(strippedBody, p.modelResolver.Reminder())
 		}
 
-		if routeModel != "" {
+		if route.Model != "" {
 			streamMode := "non-streaming"
 			var reqMeta struct {
 				Stream bool `json:"stream"`
@@ -227,14 +227,18 @@ func (p *Proxy) handleTunnel(tlsConn net.Conn, host, port string) {
 			if json.Unmarshal(body, &reqMeta) == nil && reqMeta.Stream {
 				streamMode = "streaming"
 			}
-			log.Printf("LOCAL_ROUTE %s https://%s:%s%s → model=%s (%s)",
-				req.Method, host, port, req.URL.RequestURI(), routeModel, streamMode)
+			agentTag := ""
+			if route.Agent != "" {
+				agentTag = fmt.Sprintf(" agent=%s", route.Agent)
+			}
+			log.Printf("LOCAL_ROUTE %s https://%s:%s%s → model=%s%s (%s)",
+				req.Method, host, port, req.URL.RequestURI(), route.Model, agentTag, streamMode)
 
 			var reqModel struct {
 				Model string `json:"model"`
 			}
 			json.Unmarshal(strippedBody, &reqModel)
-			p.forwardLocal(tlsConn, routeModel, strippedBody, reqModel.Model)
+			p.forwardLocal(tlsConn, route, strippedBody, reqModel.Model)
 		} else {
 			if !p.forwardUpstream(tlsConn, host, port, req, body) {
 				return
@@ -374,7 +378,9 @@ func writeResponseHeadersWithCL(w io.Writer, resp *http.Response, bodyLen int) {
 // `model` field is rewritten to musistudio's "<provider>,<model>" selector.
 // musistudio handles Anthropic↔OpenAI translation, provider quirks, SSE rewrites,
 // tool-use normalization, fallback, etc.
-func (p *Proxy) forwardLocal(w io.Writer, modelLabel string, body []byte, originalModel string) {
+func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte, originalModel string) {
+	modelLabel := route.Model
+
 	if p.modelResolver == nil {
 		// No config — fall back to stub response
 		isStreaming := false
@@ -390,7 +396,22 @@ func (p *Proxy) forwardLocal(w io.Writer, modelLabel string, body []byte, origin
 
 	start := time.Now()
 
-	resolved, err := p.modelResolver.Resolve(modelLabel)
+	var resolved config.ResolvedModel
+	var err error
+
+	switch route.Model {
+	case "direct":
+		resolved, err = p.modelResolver.ResolveDefault()
+	case "opencode":
+		if route.Agent == "" {
+			err = fmt.Errorf("model=opencode requires agent=NAME in routing marker")
+		} else {
+			resolved, err = p.modelResolver.ResolveCommand("opencode", route.Agent)
+		}
+	default:
+		resolved, err = p.modelResolver.Resolve(route.Model)
+	}
+
 	if err != nil {
 		log.Printf("model resolution failed: %v", err)
 		errBody := formatError("invalid_request_error",
