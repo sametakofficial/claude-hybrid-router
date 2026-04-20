@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/peter-wagstaff/claude-hybrid-router/internal/config"
 )
 
 func TestExpandCommand(t *testing.T) {
@@ -252,68 +250,6 @@ func TestCommandBridgeTurn2(t *testing.T) {
 	block := content[0].(map[string]interface{})
 	if block["text"] != "command output here" {
 		t.Errorf("expected tool result text, got %v", block["text"])
-	}
-}
-
-func TestCommandBridgeTurn2ExaEnvelope(t *testing.T) {
-	var buf bytes.Buffer
-	body := `{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"{\"results\":[{\"id\":\"src_1\",\"title\":\"Prompt Injection Paper\",\"url\":\"https://arxiv.org/abs/2302.12173\",\"summary\":\"Shows indirect prompt injection against LLM-integrated applications.\",\"highlights\":[\"Indirect prompt injection can hijack downstream behavior.\"]}]}"}]}]}`
-
-	p := &Proxy{modelResolver: &config.ModelResolver{}}
-	p.forwardCommand(&buf, "ignored", "agent", "exa", []byte(body), false)
-
-	parts := strings.SplitN(buf.String(), "\r\n\r\n", 2)
-	if len(parts) != 2 {
-		t.Fatalf("expected header+body, got: %s", buf.String())
-	}
-	var msg map[string]interface{}
-	if err := json.Unmarshal([]byte(parts[1]), &msg); err != nil {
-		t.Fatalf("JSON parse: %v", err)
-	}
-	content := msg["content"].([]interface{})
-	block := content[0].(map[string]interface{})
-	text := block["text"].(string)
-	if !strings.Contains(text, `"provider": "exa"`) {
-		t.Fatalf("expected exa envelope, got %s", text)
-	}
-	if strings.Contains(text, `"text": "`) {
-		t.Fatalf("expected default full text to stay omitted/null, got %s", text)
-	}
-}
-
-func TestCommandBridgeTurn2ExaLowSignalFallback(t *testing.T) {
-	var buf bytes.Buffer
-	body := `{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"{\"results\":[{\"id\":\"src_1\",\"title\":\"Sparse Result\",\"url\":\"https://example.com/report.pdf\",\"summary\":\"\",\"highlights\":[],\"text\":\"full raw document text\"}]}"}]}]}`
-
-	resolver, err := config.NewModelResolver(&config.ProvidersConfig{Providers: []config.ProviderConfig{{
-		Name:    "exa",
-		Command: "exa-safe-wrapper --query '$PROMPT'",
-		Exa: config.ExaConfig{
-			Mode:                "envelope",
-			DefaultFullText:     false,
-			AllowFullText:       true,
-			FullTextOnLowSignal: true,
-			TextMaxCharacters:   0,
-		},
-		Models: map[string]config.ModelConfig{"research": {Model: "exa-research"}},
-	}}})
-	if err != nil {
-		t.Fatalf("resolver: %v", err)
-	}
-	p := &Proxy{modelResolver: resolver}
-	p.forwardCommand(&buf, "ignored", "agent", "research", []byte(body), false)
-
-	parts := strings.SplitN(buf.String(), "\r\n\r\n", 2)
-	var msg map[string]interface{}
-	if err := json.Unmarshal([]byte(parts[1]), &msg); err != nil {
-		t.Fatalf("JSON parse: %v", err)
-	}
-	text := msg["content"].([]interface{})[0].(map[string]interface{})["text"].(string)
-	if !strings.Contains(text, `"fallback_reason": "low_signal"`) {
-		t.Fatalf("expected low_signal fallback, got %s", text)
-	}
-	if !strings.Contains(text, `"full_text_included": true`) {
-		t.Fatalf("expected bounded text fallback, got %s", text)
 	}
 }
 

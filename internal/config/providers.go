@@ -29,22 +29,6 @@ func (mc *ModelConfig) UnmarshalYAML(value *yaml.Node) error {
 	return value.Decode((*raw)(mc))
 }
 
-type ExaConfig struct {
-	Mode                    string `yaml:"mode,omitempty"`
-	DefaultFullText         bool   `yaml:"default_full_text,omitempty"`
-	AllowFullText           bool   `yaml:"allow_full_text,omitempty"`
-	FullTextOnLowSignal     bool   `yaml:"full_text_on_low_signal,omitempty"`
-	MinHighlightChars       int    `yaml:"min_highlight_chars,omitempty"`
-	DefaultNumResults       int    `yaml:"default_num_results,omitempty"`
-	MaxNumResults           int    `yaml:"max_num_results,omitempty"`
-	SearchType              string `yaml:"search_type,omitempty"`
-	EnableHighlights        *bool  `yaml:"enable_highlights,omitempty"`
-	EnableSummary           *bool  `yaml:"enable_summary,omitempty"`
-	HighlightsMaxCharacters int    `yaml:"highlights_max_characters,omitempty"`
-	TextMaxCharacters       int    `yaml:"text_max_characters,omitempty"`
-	MaxAgeHours             int    `yaml:"max_age_hours,omitempty"`
-}
-
 // ProviderConfig represents either:
 //   - a musistudio-routed provider (Endpoint+APIKey empty → uses egress default, or points at musistudio)
 //   - a command bridge (Command non-empty; short-circuits all HTTP forwarding)
@@ -57,7 +41,6 @@ type ProviderConfig struct {
 	Command   string                 `yaml:"command,omitempty"`  // shell command template; skips endpoint entirely
 	APIKey    string                 `yaml:"api_key,omitempty"`
 	MaxTokens int                    `yaml:"max_tokens,omitempty"`
-	Exa       ExaConfig              `yaml:"exa,omitempty"`
 	Models    map[string]ModelConfig `yaml:"models"` // label → backend model name or config
 }
 
@@ -66,7 +49,6 @@ type ProviderConfig struct {
 type EgressConfig struct {
 	URL              string `yaml:"url,omitempty"`                // default: http://127.0.0.1:3456
 	APIKey           string `yaml:"api_key,omitempty"`            // forwarded as x-api-key
-	RouteAll         string `yaml:"route_all,omitempty"`          // route ALL requests to this model label (no marker needed)
 	SystemPromptFile string `yaml:"system_prompt_file,omitempty"` // file path; replaces the system field in every routed request
 	ReminderFile     string `yaml:"reminder_file,omitempty"`      // file path; injected as <system-reminder> into tool_result messages
 	Timeout          int    `yaml:"timeout,omitempty"`            // seconds; time to wait for first response byte (default 30)
@@ -90,84 +72,17 @@ type ResolvedModel struct {
 	Label     string // original label, e.g. "fast_coder"
 	Provider  string // provider name as declared in the YAML (logging only)
 	MaxTokens int    // cap max_tokens (0 = no cap)
-	Exa       ExaConfig
 }
 
 // ModelResolver resolves model labels to provider details.
 type ModelResolver struct {
 	models       map[string]ResolvedModel
-	routeAll     string        // if set, ALL requests route to this label
 	systemPrompt string        // if set, replaces the system field in routed requests
 	reminder     string        // if set, injected into tool_result messages as <system-reminder>
 	timeout      time.Duration // time to wait for first response byte from egress
 }
 
 var envVarRE = regexp.MustCompile(`\$\{([^}]+)\}`)
-
-func defaultExaConfig(cfg ExaConfig) ExaConfig {
-	if cfg.Mode == "" {
-		cfg.Mode = "envelope"
-	}
-	if cfg.MinHighlightChars <= 0 {
-		cfg.MinHighlightChars = 300
-	}
-	if cfg.DefaultNumResults <= 0 {
-		cfg.DefaultNumResults = 5
-	}
-	if cfg.MaxNumResults <= 0 {
-		cfg.MaxNumResults = 10
-	}
-	if cfg.DefaultNumResults > cfg.MaxNumResults {
-		cfg.DefaultNumResults = cfg.MaxNumResults
-	}
-	if cfg.SearchType == "" {
-		cfg.SearchType = "auto"
-	}
-	if cfg.EnableHighlights == nil {
-		v := true
-		cfg.EnableHighlights = &v
-	}
-	if cfg.EnableSummary == nil {
-		v := true
-		cfg.EnableSummary = &v
-	}
-	if cfg.HighlightsMaxCharacters <= 0 {
-		cfg.HighlightsMaxCharacters = 1200
-	}
-	if cfg.MaxAgeHours <= 0 {
-		cfg.MaxAgeHours = 24
-	}
-	if !cfg.AllowFullText && !cfg.DefaultFullText {
-		cfg.AllowFullText = true
-	}
-	return cfg
-}
-
-func validateExaConfig(cfg ExaConfig) error {
-	switch cfg.Mode {
-	case "", "envelope", "passthrough":
-	default:
-		return fmt.Errorf("invalid exa.mode %q", cfg.Mode)
-	}
-	switch cfg.SearchType {
-	case "", "auto", "fast", "instant":
-	default:
-		return fmt.Errorf("invalid exa.search_type %q", cfg.SearchType)
-	}
-	if cfg.DefaultNumResults < 0 {
-		return fmt.Errorf("invalid exa.default_num_results %d", cfg.DefaultNumResults)
-	}
-	if cfg.MaxNumResults < 0 {
-		return fmt.Errorf("invalid exa.max_num_results %d", cfg.MaxNumResults)
-	}
-	if cfg.MaxNumResults > 0 && cfg.DefaultNumResults > cfg.MaxNumResults {
-		return fmt.Errorf("exa.default_num_results cannot exceed exa.max_num_results")
-	}
-	if cfg.TextMaxCharacters < 0 {
-		return fmt.Errorf("invalid exa.text_max_characters %d", cfg.TextMaxCharacters)
-	}
-	return nil
-}
 
 // expandEnvVars replaces ${VAR} references with environment variable values.
 func expandEnvVars(s string) string {
@@ -215,11 +130,6 @@ func NewModelResolver(cfg *ProvidersConfig) (*ModelResolver, error) {
 		if apiKey == "" {
 			apiKey = globalKey
 		}
-		if err := validateExaConfig(p.Exa); err != nil {
-			return nil, fmt.Errorf("provider %q: %w", p.Name, err)
-		}
-		exaCfg := defaultExaConfig(p.Exa)
-
 		for label, mc := range p.Models {
 			if _, exists := models[label]; exists {
 				return nil, fmt.Errorf("duplicate model label %q", label)
@@ -244,17 +154,9 @@ func NewModelResolver(cfg *ProvidersConfig) (*ModelResolver, error) {
 				Label:     label,
 				Provider:  p.Name,
 				MaxTokens: maxTokens,
-					Exa:       exaCfg,
 			}
 		}
 	}
-	routeAll := cfg.Egress.RouteAll
-	if routeAll != "" {
-		if _, ok := models[routeAll]; !ok {
-			return nil, fmt.Errorf("route_all label %q not found in any provider", routeAll)
-		}
-	}
-
 	var systemPrompt string
 	if cfg.Egress.SystemPromptFile != "" {
 		path := cfg.Egress.SystemPromptFile
@@ -290,12 +192,7 @@ func NewModelResolver(cfg *ProvidersConfig) (*ModelResolver, error) {
 		timeout = UpstreamTimeout
 	}
 
-	return &ModelResolver{models: models, routeAll: routeAll, systemPrompt: systemPrompt, reminder: reminder, timeout: timeout}, nil
-}
-
-// RouteAll returns the route_all label, or "" if not configured.
-func (r *ModelResolver) RouteAll() string {
-	return r.routeAll
+	return &ModelResolver{models: models, systemPrompt: systemPrompt, reminder: reminder, timeout: timeout}, nil
 }
 
 // SystemPrompt returns the system prompt override text, or "" if not configured.

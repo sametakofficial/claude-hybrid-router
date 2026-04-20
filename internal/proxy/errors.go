@@ -1,9 +1,7 @@
 package proxy
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
 	"strings"
 )
 
@@ -52,15 +50,3 @@ func formatError(errType, message string) []byte {
 	return out
 }
 
-// formatStreamError creates SSE events for a mid-stream error: error event + message_stop.
-func formatStreamError(errType, message string) []byte {
-	errData, _ := json.Marshal(aErrorResponse{
-		Type:  "error",
-		Error: aError{Type: errType, Message: message},
-	})
-	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "event: error\ndata: %s\n\n", errData)
-	stopData, _ := json.Marshal(map[string]string{"type": "message_stop"})
-	fmt.Fprintf(&buf, "event: message_stop\ndata: %s\n\n", stopData)
-	return buf.Bytes()
-}

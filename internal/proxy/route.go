@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 )
 
 var routeMarkerRE = regexp.MustCompile(`<!-- @proxy-local-route:af83e9 model=(\S+) -->`)
@@ -32,7 +33,7 @@ func detectLocalRoute(body []byte) (model string, stripped []byte) {
 		if m != nil {
 			cleaned := routeMarkerRE.ReplaceAllString(s, "")
 			// Trim leading/trailing whitespace left by marker removal
-			data["system"] = trimSpace(cleaned)
+			data["system"] = strings.TrimSpace(cleaned)
 			out, _ := json.Marshal(data)
 			return m[1], out
 		}
@@ -48,7 +49,7 @@ func detectLocalRoute(body []byte) (model string, stripped []byte) {
 			}
 			m := routeMarkerRE.FindStringSubmatch(text)
 			if m != nil {
-				bm["text"] = trimSpace(routeMarkerRE.ReplaceAllString(text, ""))
+				bm["text"] = strings.TrimSpace(routeMarkerRE.ReplaceAllString(text, ""))
 				out, _ := json.Marshal(data)
 				return m[1], out
 			}
@@ -58,18 +59,6 @@ func detectLocalRoute(body []byte) (model string, stripped []byte) {
 	return "", body
 }
 
-// trimSpace trims whitespace but preserves non-empty content.
-func trimSpace(s string) string {
-	// Match Python's str.strip()
-	result := s
-	for len(result) > 0 && (result[0] == ' ' || result[0] == '\t' || result[0] == '\n' || result[0] == '\r') {
-		result = result[1:]
-	}
-	for len(result) > 0 && (result[len(result)-1] == ' ' || result[len(result)-1] == '\t' || result[len(result)-1] == '\n' || result[len(result)-1] == '\r') {
-		result = result[:len(result)-1]
-	}
-	return result
-}
 
 // sendLocalStub writes an Anthropic Messages API stub response.
 func sendLocalStub(w io.Writer, model string, streaming bool) {

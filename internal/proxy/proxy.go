@@ -207,15 +207,6 @@ func (p *Proxy) handleTunnel(tlsConn net.Conn, host, port string) {
 
 		routeModel, strippedBody := detectLocalRoute(body)
 
-		// route_all: if no marker found but route_all is configured and this is
-		// an Anthropic /v1/messages request, force-route to the configured label.
-		// Non-messages endpoints (telemetry, MCP registry, etc.) pass through upstream.
-		if routeModel == "" && p.modelResolver != nil && p.modelResolver.RouteAll() != "" &&
-			isAPIHost(host) && req.URL.Path == "/v1/messages" {
-			routeModel = p.modelResolver.RouteAll()
-			strippedBody = body // no marker to strip
-		}
-
 		// System prompt override: replace the system field before forwarding.
 		if routeModel != "" && p.modelResolver != nil && p.modelResolver.SystemPrompt() != "" &&
 			req.Method == "POST" {
@@ -512,21 +503,6 @@ func (p *Proxy) forwardLocal(w io.Writer, modelLabel string, body []byte, origin
 	}
 }
 
-// rewriteResponseModel replaces the "model" field in an Anthropic JSON response
-// with the original Claude model name so Claude Code accepts it.
-func rewriteResponseModel(body []byte, model string) []byte {
-	var data map[string]interface{}
-	if json.Unmarshal(body, &data) != nil {
-		return body
-	}
-	if _, ok := data["model"]; ok {
-		data["model"] = model
-		if out, err := json.Marshal(data); err == nil {
-			return out
-		}
-	}
-	return body
-}
 
 // injectReminder appends a <system-reminder> text block to every user message
 // that contains a tool_result content block. This ensures the reminder is
@@ -594,26 +570,6 @@ func rewriteSystemPrompt(body []byte, newSystem string) []byte {
 	return out
 }
 
-var modelFieldRe = regexp.MustCompile(`"model"\s*:\s*"[^"]*"`)
-
-// streamWithModelRewrite reads the first chunk from src, replaces the model
-// field, writes it to dst, then copies the rest with io.Copy. No buffering.
-func streamWithModelRewrite(dst io.Writer, src io.Reader, targetModel string) error {
-	buf := make([]byte, 16*1024)
-	n, err := src.Read(buf)
-	if n > 0 {
-		chunk := buf[:n]
-		chunk = modelFieldRe.ReplaceAll(chunk, []byte(`"model":"`+targetModel+`"`))
-		if _, werr := dst.Write(chunk); werr != nil {
-			return werr
-		}
-	}
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(dst, src)
-	return err
-}
 
 // rewriteBodyForEgress swaps the model field for musistudio's "<provider>,<model>"
 // format and optionally caps max_tokens. Returns the new body, the stream flag,

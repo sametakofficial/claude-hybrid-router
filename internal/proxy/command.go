@@ -51,13 +51,6 @@ func (p *Proxy) forwardCommand(w io.Writer, command, agentName, modelLabel strin
 		} else {
 			log.Printf("COMMAND_TURN2 %s → returning tool result as text (%d chars)", modelLabel, len(displayText))
 		}
-		resolved := config.ResolvedModel{Provider: modelLabel}
-		if p.modelResolver != nil {
-			if rm, err := p.modelResolver.Resolve(modelLabel); err == nil {
-				resolved = rm
-			}
-		}
-		displayText = maybeNormalizeExaToolResult(displayText, resolved)
 		if isStreaming {
 			writeSSEText(w, modelLabel, displayText)
 		} else {
