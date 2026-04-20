@@ -8,12 +8,12 @@ import (
 	"strings"
 )
 
-var routeMarkerRE = regexp.MustCompile(`<!-- @proxy-local-route:af83e9 model=(\S+)(?:\s+agent=(\S+))? -->`)
+var routeMarkerRE = regexp.MustCompile(`<!-- @proxy-local-route:af83e9 url=(\S+)(?:\s+agent=(\S+))? -->`)
 
 // RouteDirective holds the parsed fields from a routing marker.
 type RouteDirective struct {
-	Model string // "opencode", "direct", "chat", etc.
-	Agent string // only for model=opencode; e.g. "simplifier"
+	Route string // route name from config (e.g. "fast", "local")
+	Agent string // optional; e.g. "simplifier"
 }
 
 // detectLocalRoute checks the system field of a JSON body for a routing marker.
@@ -42,7 +42,7 @@ func detectLocalRoute(body []byte) (route RouteDirective, stripped []byte) {
 			// Trim leading/trailing whitespace left by marker removal
 			data["system"] = strings.TrimSpace(cleaned)
 			out, _ := json.Marshal(data)
-			return RouteDirective{Model: m[1], Agent: m[2]}, out
+			return RouteDirective{Route: m[1], Agent: m[2]}, out
 		}
 	case []interface{}:
 		for _, block := range s {
@@ -58,7 +58,7 @@ func detectLocalRoute(body []byte) (route RouteDirective, stripped []byte) {
 			if m != nil {
 				bm["text"] = strings.TrimSpace(routeMarkerRE.ReplaceAllString(text, ""))
 				out, _ := json.Marshal(data)
-				return RouteDirective{Model: m[1], Agent: m[2]}, out
+				return RouteDirective{Route: m[1], Agent: m[2]}, out
 			}
 		}
 	}

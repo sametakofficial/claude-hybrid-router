@@ -25,7 +25,7 @@ type Proxy struct {
 	certCache     *mitm.CertCache
 	httpClient    *http.Client
 	localClient   *http.Client
-	modelResolver *config.ModelResolver
+	routeResolver *config.RouteResolver
 	sem           chan struct{}
 	verbose       bool
 }
@@ -43,9 +43,9 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(p *Proxy) { p.httpClient = c }
 }
 
-// WithModelResolver sets the model resolver for local routing.
-func WithModelResolver(r *config.ModelResolver) Option {
-	return func(p *Proxy) { p.modelResolver = r }
+// WithRouteResolver sets the route resolver for local routing.
+func WithRouteResolver(r *config.RouteResolver) Option {
+	return func(p *Proxy) { p.routeResolver = r }
 }
 
 // New creates a new Proxy.
@@ -75,8 +75,8 @@ func New(cache *mitm.CertCache, opts ...Option) *Proxy {
 	}
 	if p.localClient == nil {
 		egressTimeout := config.UpstreamTimeout
-		if p.modelResolver != nil {
-			egressTimeout = p.modelResolver.Timeout()
+		if p.routeResolver != nil {
+			egressTimeout = p.routeResolver.Timeout()
 		}
 		p.localClient = &http.Client{
 			Transport: &http.Transport{
@@ -208,18 +208,18 @@ func (p *Proxy) handleTunnel(tlsConn net.Conn, host, port string) {
 		route, strippedBody := detectLocalRoute(body)
 
 		// System prompt override: replace the system field before forwarding.
-		if route.Model != "" && p.modelResolver != nil && p.modelResolver.SystemPrompt() != "" &&
+		if route.Route != "" && p.routeResolver != nil && p.routeResolver.SystemPrompt() != "" &&
 			req.Method == "POST" {
-			strippedBody = rewriteSystemPrompt(strippedBody, p.modelResolver.SystemPrompt())
+			strippedBody = rewriteSystemPrompt(strippedBody, p.routeResolver.SystemPrompt())
 		}
 
 		// Reminder injection: append <system-reminder> to messages containing tool_result.
-		if route.Model != "" && p.modelResolver != nil && p.modelResolver.Reminder() != "" &&
+		if route.Route != "" && p.routeResolver != nil && p.routeResolver.Reminder() != "" &&
 			req.Method == "POST" {
-			strippedBody = injectReminder(strippedBody, p.modelResolver.Reminder())
+			strippedBody = injectReminder(strippedBody, p.routeResolver.Reminder())
 		}
 
-		if route.Model != "" {
+		if route.Route != "" {
 			streamMode := "non-streaming"
 			var reqMeta struct {
 				Stream bool `json:"stream"`
@@ -231,14 +231,10 @@ func (p *Proxy) handleTunnel(tlsConn net.Conn, host, port string) {
 			if route.Agent != "" {
 				agentTag = fmt.Sprintf(" agent=%s", route.Agent)
 			}
-			log.Printf("LOCAL_ROUTE %s https://%s:%s%s → model=%s%s (%s)",
-				req.Method, host, port, req.URL.RequestURI(), route.Model, agentTag, streamMode)
+			log.Printf("LOCAL_ROUTE %s https://%s:%s%s → route=%s%s (%s)",
+				req.Method, host, port, req.URL.RequestURI(), route.Route, agentTag, streamMode)
 
-			var reqModel struct {
-				Model string `json:"model"`
-			}
-			json.Unmarshal(strippedBody, &reqModel)
-			p.forwardLocal(tlsConn, route, strippedBody, reqModel.Model)
+			p.forwardLocal(tlsConn, route, strippedBody)
 		} else {
 			if !p.forwardUpstream(tlsConn, host, port, req, body) {
 				return
@@ -373,15 +369,12 @@ func writeResponseHeadersWithCL(w io.Writer, resp *http.Response, bodyLen int) {
 }
 
 // forwardLocal handles a request whose system field carried a routing marker.
-// After the musistudio egress migration, the Anthropic request body is sent
-// verbatim to the configured musistudio /v1/messages endpoint — only the
-// `model` field is rewritten to musistudio's "<provider>,<model>" selector.
-// musistudio handles Anthropic↔OpenAI translation, provider quirks, SSE rewrites,
-// tool-use normalization, fallback, etc.
-func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte, originalModel string) {
-	modelLabel := route.Model
+// The proxy is a pure URL forwarder: detect marker → strip marker → forward
+// body AS-IS to the resolved URL → relay response.
+func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte) {
+	routeName := route.Route
 
-	if p.modelResolver == nil {
+	if p.routeResolver == nil {
 		// No config — fall back to stub response
 		isStreaming := false
 		var data map[string]interface{}
@@ -390,67 +383,33 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte, ori
 				isStreaming = s
 			}
 		}
-		sendLocalStub(w, modelLabel, isStreaming)
+		sendLocalStub(w, routeName, isStreaming)
 		return
 	}
 
 	start := time.Now()
-
-	var resolved config.ResolvedModel
-	var err error
-
-	switch route.Model {
-	case "direct":
-		resolved, err = p.modelResolver.ResolveDefault()
-	case "opencode":
-		if route.Agent == "" {
-			err = fmt.Errorf("model=opencode requires agent=NAME in routing marker")
-		} else {
-			resolved, err = p.modelResolver.ResolveCommand("opencode", route.Agent)
-		}
-	default:
-		resolved, err = p.modelResolver.Resolve(route.Model)
-	}
-
+	routeURL, err := p.routeResolver.Resolve(routeName)
 	if err != nil {
-		log.Printf("model resolution failed: %v", err)
+		log.Printf("route resolution failed: %v", err)
 		errBody := formatError("invalid_request_error",
-			fmt.Sprintf("Unknown model label %q — check ~/.claude-hybrid/config.yaml", modelLabel))
+			fmt.Sprintf("Unknown route %q — check ~/.claude-hybrid/config.yaml", routeName))
 		sendAnthropicError(w, 400, errBody)
 		return
 	}
 
-	// Command bridge short-circuit: return tool_use for Bash, bypass egress.
-	if resolved.Command != "" {
-		isStreaming := false
-		var data map[string]interface{}
-		if json.Unmarshal(body, &data) == nil {
-			if s, ok := data["stream"].(bool); ok {
-				isStreaming = s
-			}
+	isStreaming := false
+	var data map[string]interface{}
+	if json.Unmarshal(body, &data) == nil {
+		if s, ok := data["stream"].(bool); ok {
+			isStreaming = s
 		}
-		// Command providers historically stored the agent name under Model;
-		// keep that contract untouched.
-		p.forwardCommand(w, resolved.Command, resolved.Model, modelLabel, body, isStreaming)
-		return
 	}
 
-	// Rewrite the Anthropic body for musistudio: swap `model` → "<prov>,<model>",
-	// optionally cap max_tokens. Everything else passes through untouched.
-	egressBody, isStreaming, err := rewriteBodyForEgress(body, resolved.Model, resolved.MaxTokens)
-	if err != nil {
-		log.Printf("[LOCAL_ERR:PARSE] body rewrite failed for %s: %v", modelLabel, err)
-		errBody := formatError("invalid_request_error",
-			fmt.Sprintf("Failed to parse request body: %v", err))
-		sendAnthropicError(w, 400, errBody)
-		return
-	}
-
-	endpoint := resolved.Endpoint + "/v1/messages"
+	endpoint := routeURL + "/v1/messages"
 	maxAttempts := 1 + config.EgressMaxRetries
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		localReq, err := http.NewRequest("POST", endpoint, strings.NewReader(string(egressBody)))
+		localReq, err := http.NewRequest("POST", endpoint, strings.NewReader(string(body)))
 		if err != nil {
 			log.Printf("failed to create egress request: %v", err)
 			errBody := formatError("api_error", fmt.Sprintf("Failed to create request: %v", err))
@@ -459,28 +418,26 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte, ori
 		}
 		localReq.Header.Set("Content-Type", "application/json")
 		localReq.Header.Set("anthropic-version", "2023-06-01")
-		if resolved.APIKey != "" {
-			localReq.Header.Set("x-api-key", resolved.APIKey)
+		if route.Agent != "" {
+			localReq.Header.Set("X-Agent-Name", route.Agent)
 		}
 
 		resp, err := p.localClient.Do(localReq)
 		if err != nil {
 			cat := classifyError(err)
-			// Never retry on transport-level errors (timeouts, connection refused).
-			// These already waited 120s — retrying would multiply the wait.
-			log.Printf("[LOCAL_ERR:%s] egress unreachable for %s: %v (%s)", cat, modelLabel, err, endpoint)
+			log.Printf("[LOCAL_ERR:%s] egress unreachable for %s: %v (%s)", cat, routeName, err, endpoint)
 			errBody := formatError("api_error",
-				fmt.Sprintf("[%s] Egress '%s' unreachable: %v (%s)", cat, modelLabel, err, endpoint))
+				fmt.Sprintf("[%s] Route '%s' unreachable: %v (%s)", cat, routeName, err, endpoint))
 			sendAnthropicError(w, 502, errBody)
 			return
 		}
 
 		if isRetryableStatus(resp.StatusCode) && attempt < maxAttempts {
-			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			delay := retryDelay(attempt)
-			log.Printf("[LOCAL_RETRY:%d/%d] egress %s returned %d — retrying in %v (body: %s)",
-				attempt, maxAttempts, modelLabel, resp.StatusCode, delay, sanitizeForLog(string(respBody)))
+			log.Printf("[LOCAL_RETRY:%d/%d] route %s returned %d — retrying in %v",
+				attempt, maxAttempts, routeName, resp.StatusCode, delay)
 			time.Sleep(delay)
 			continue
 		}
@@ -489,11 +446,11 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte, ori
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			sanitized := sanitizeForLog(string(respBody))
-			log.Printf("[LOCAL_ERR:HTTP_%d] egress %s returned %d: %s", resp.StatusCode, modelLabel, resp.StatusCode, sanitized)
+			log.Printf("[LOCAL_ERR:HTTP_%d] route %s returned %d: %s", resp.StatusCode, routeName, resp.StatusCode, sanitized)
 			forwarded := respBody
 			if !isAnthropicError(respBody) {
 				forwarded = formatError("api_error",
-					fmt.Sprintf("[HTTP_%d] Egress '%s' returned %d: %s", resp.StatusCode, modelLabel, resp.StatusCode, sanitized))
+					fmt.Sprintf("[HTTP_%d] Route '%s' returned %d: %s", resp.StatusCode, routeName, resp.StatusCode, sanitized))
 			}
 			code := 502
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
@@ -506,10 +463,11 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte, ori
 		if err := resp.Write(w); err != nil {
 			resp.Body.Close()
 			cat := classifyError(err)
-			log.Printf("[LOCAL_ERR:%s] response write for %s: %v", cat, modelLabel, err)
+			log.Printf("[LOCAL_ERR:%s] response write for %s: %v", cat, routeName, err)
 			return
 		}
 		resp.Body.Close()
+
 		streamTag := ""
 		if isStreaming {
 			streamTag = "streaming, "
@@ -518,8 +476,7 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte, ori
 		if attempt > 1 {
 			retryTag = fmt.Sprintf("retry %d, ", attempt-1)
 		}
-		log.Printf("LOCAL_OK %s → %s/%s (%s%s%dms)",
-			modelLabel, resolved.Provider, resolved.Model, retryTag, streamTag, time.Since(start).Milliseconds())
+		log.Printf("LOCAL_OK %s (%s%s%dms)", routeName, retryTag, streamTag, time.Since(start).Milliseconds())
 		return
 	}
 }
@@ -592,32 +549,6 @@ func rewriteSystemPrompt(body []byte, newSystem string) []byte {
 }
 
 
-// rewriteBodyForEgress swaps the model field for musistudio's "<provider>,<model>"
-// format and optionally caps max_tokens. Returns the new body, the stream flag,
-// and any parse error. Unknown fields are preserved verbatim.
-func rewriteBodyForEgress(body []byte, egressModel string, maxTokensCap int) ([]byte, bool, error) {
-	var data map[string]interface{}
-	if err := json.Unmarshal(body, &data); err != nil {
-		return nil, false, err
-	}
-	data["model"] = egressModel
-	if maxTokensCap > 0 {
-		// Only cap if the client asked for more — never raise.
-		if current, ok := data["max_tokens"].(float64); ok {
-			if int(current) > maxTokensCap {
-				data["max_tokens"] = maxTokensCap
-			}
-		} else if _, exists := data["max_tokens"]; !exists {
-			data["max_tokens"] = maxTokensCap
-		}
-	}
-	isStreaming := false
-	if s, ok := data["stream"].(bool); ok {
-		isStreaming = s
-	}
-	out, err := json.Marshal(data)
-	return out, isStreaming, err
-}
 
 // isAnthropicError returns true if body matches {"type":"error","error":{...}}.
 func isAnthropicError(body []byte) bool {

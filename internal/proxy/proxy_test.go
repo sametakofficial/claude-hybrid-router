@@ -144,7 +144,7 @@ func TestLocalRouteDetected(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 model=my_local_model --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=my_local_model --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hello"}},
 	})
 	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
@@ -180,7 +180,7 @@ func TestLocalRouteStreaming(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 model=my_local_model --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=my_local_model --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hello"}},
 		"stream":   true,
 	})
@@ -203,7 +203,7 @@ func TestLocalRouteMarkerStripped(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 model=test_model --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=test_model --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hello"}},
 	})
 	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
@@ -221,7 +221,7 @@ func TestMarkerInMessagesNotRouted(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"messages": []map[string]string{{
 			"role":    "user",
-			"content": "<!-- @proxy-local-route:af83e9 model=my_local_model --> hello",
+			"content": "<!-- @proxy-local-route:af83e9 url=my_local_model --> hello",
 		}},
 	})
 	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
@@ -248,7 +248,7 @@ func TestAuthHeadersNotLogged(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 model=my_local_model --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=my_local_model --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hello"}},
 	})
 	status, _, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, map[string]string{

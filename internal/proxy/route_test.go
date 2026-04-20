@@ -9,13 +9,13 @@ import (
 
 func TestDetectLocalRoute_StringSystem(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
-		"system":   "<!-- @proxy-local-route:af83e9 model=my_model --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=my_model --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 
 	route, stripped := detectLocalRoute(body)
-	if route.Model != "my_model" {
-		t.Fatalf("expected my_model, got %q", route.Model)
+	if route.Route != "my_model" {
+		t.Fatalf("expected my_model, got %q", route.Route)
 	}
 	if route.Agent != "" {
 		t.Fatalf("expected empty agent, got %q", route.Agent)
@@ -32,14 +32,14 @@ func TestDetectLocalRoute_StringSystem(t *testing.T) {
 func TestDetectLocalRoute_ListSystem(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"system": []map[string]string{
-			{"type": "text", "text": "<!-- @proxy-local-route:af83e9 model=list_model --> Instructions"},
+			{"type": "text", "text": "<!-- @proxy-local-route:af83e9 url=list_model --> Instructions"},
 		},
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 
 	route, stripped := detectLocalRoute(body)
-	if route.Model != "list_model" {
-		t.Fatalf("expected list_model, got %q", route.Model)
+	if route.Route != "list_model" {
+		t.Fatalf("expected list_model, got %q", route.Route)
 	}
 
 	var data map[string]interface{}
@@ -58,8 +58,8 @@ func TestDetectLocalRoute_NoMarker(t *testing.T) {
 	})
 
 	route, stripped := detectLocalRoute(body)
-	if route.Model != "" {
-		t.Fatalf("expected no model, got %q", route.Model)
+	if route.Route != "" {
+		t.Fatalf("expected no model, got %q", route.Route)
 	}
 	if !bytes.Equal(stripped, body) {
 		t.Error("body should be unchanged")
@@ -70,13 +70,13 @@ func TestDetectLocalRoute_MarkerInMessages(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"messages": []map[string]string{{
 			"role":    "user",
-			"content": "<!-- @proxy-local-route:af83e9 model=my_model --> hello",
+			"content": "<!-- @proxy-local-route:af83e9 url=my_model --> hello",
 		}},
 	})
 
 	route, stripped := detectLocalRoute(body)
-	if route.Model != "" {
-		t.Fatalf("should not detect marker in messages, got %q", route.Model)
+	if route.Route != "" {
+		t.Fatalf("should not detect marker in messages, got %q", route.Route)
 	}
 	if !bytes.Equal(stripped, body) {
 		t.Error("body should be unchanged")
@@ -86,8 +86,8 @@ func TestDetectLocalRoute_MarkerInMessages(t *testing.T) {
 func TestDetectLocalRoute_NonJSON(t *testing.T) {
 	body := []byte("not json at all")
 	route, stripped := detectLocalRoute(body)
-	if route.Model != "" {
-		t.Fatalf("expected no model, got %q", route.Model)
+	if route.Route != "" {
+		t.Fatalf("expected no model, got %q", route.Route)
 	}
 	if !bytes.Equal(stripped, body) {
 		t.Error("body should be unchanged")
@@ -96,20 +96,20 @@ func TestDetectLocalRoute_NonJSON(t *testing.T) {
 
 func TestDetectLocalRoute_EmptyBody(t *testing.T) {
 	route, stripped := detectLocalRoute(nil)
-	if route.Model != "" || stripped != nil {
+	if route.Route != "" || stripped != nil {
 		t.Error("expected nil passthrough")
 	}
 }
 
 func TestDetectLocalRoute_WithAgent(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
-		"system":   "<!-- @proxy-local-route:af83e9 model=opencode agent=simplifier --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=opencode agent=simplifier --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 
 	route, stripped := detectLocalRoute(body)
-	if route.Model != "opencode" {
-		t.Fatalf("expected model=opencode, got %q", route.Model)
+	if route.Route != "opencode" {
+		t.Fatalf("expected model=opencode, got %q", route.Route)
 	}
 	if route.Agent != "simplifier" {
 		t.Fatalf("expected agent=simplifier, got %q", route.Agent)
@@ -126,14 +126,14 @@ func TestDetectLocalRoute_WithAgent(t *testing.T) {
 func TestDetectLocalRoute_WithAgentListSystem(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"system": []map[string]string{
-			{"type": "text", "text": "<!-- @proxy-local-route:af83e9 model=opencode agent=reviewer --> Instructions"},
+			{"type": "text", "text": "<!-- @proxy-local-route:af83e9 url=opencode agent=reviewer --> Instructions"},
 		},
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 
 	route, stripped := detectLocalRoute(body)
-	if route.Model != "opencode" {
-		t.Fatalf("expected model=opencode, got %q", route.Model)
+	if route.Route != "opencode" {
+		t.Fatalf("expected model=opencode, got %q", route.Route)
 	}
 	if route.Agent != "reviewer" {
 		t.Fatalf("expected agent=reviewer, got %q", route.Agent)

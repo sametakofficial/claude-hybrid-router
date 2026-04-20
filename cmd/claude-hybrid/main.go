@@ -182,20 +182,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "claude-hybrid: "+msg)
 	}
 
-	// Load provider config (optional)
+	// Load route config (optional)
 	opts := []proxy.Option{proxy.WithVerbose(*verbose)}
 	cfgPath := filepath.Join(baseDir, "config.yaml")
 	if _, err := os.Stat(cfgPath); err == nil {
-		cfg, err := config.LoadConfig(cfgPath)
+		cfg, err := config.LoadRoutesConfig(cfgPath)
 		if err != nil {
 			log.Fatalf("load config: %v", err)
 		}
-		resolver, err := config.NewModelResolver(cfg)
+		resolver, err := config.NewRouteResolver(cfg)
 		if err != nil {
-			log.Fatalf("build model resolver: %v", err)
+			log.Fatalf("build route resolver: %v", err)
 		}
-		opts = append(opts, proxy.WithModelResolver(resolver))
-		log.Printf("Loaded provider config from %s", cfgPath)
+		opts = append(opts, proxy.WithRouteResolver(resolver))
+		log.Printf("Loaded route config from %s", cfgPath)
 	} else {
 		log.Printf("No config at %s — local routes will return stub responses", cfgPath)
 	}

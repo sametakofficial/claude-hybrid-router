@@ -22,8 +22,8 @@ type testInfra struct {
 }
 
 // setupInfra creates a full proxy test stack: upstream echo server, MITM cert cache,
-// and proxy. When resolver is non-nil, the proxy is configured with WithModelResolver.
-func setupInfra(t *testing.T, resolver *config.ModelResolver) *testInfra {
+// and proxy. When resolver is non-nil, the proxy is configured with WithRouteResolver.
+func setupInfra(t *testing.T, resolver *config.RouteResolver) *testInfra {
 	t.Helper()
 
 	// Generate CAs
@@ -73,7 +73,7 @@ func setupInfra(t *testing.T, resolver *config.ModelResolver) *testInfra {
 	// Build proxy options
 	opts := []Option{WithHTTPClient(httpClient)}
 	if resolver != nil {
-		opts = append(opts, WithModelResolver(resolver))
+		opts = append(opts, WithRouteResolver(resolver))
 	}
 
 	// Start proxy
