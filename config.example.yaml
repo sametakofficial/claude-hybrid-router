@@ -1,98 +1,119 @@
-# claude-hybrid-router provider configuration
+# claude-hybrid-router provider configuration (post-musistudio egress)
 # Copy to ~/.claude-hybrid/config.yaml and uncomment the providers you want.
 #
-# Each provider needs:
-#   - name:      identifier used in logs
-#   - endpoint:  OpenAI-compatible API base URL
-#   - api_key:   API key (supports ${ENV_VAR} expansion, omit for local providers)
-#   - transform: chain of transforms to apply (order matters)
-#   - models:    map of label → model name (labels go in routing markers)
+# HOW IT WORKS:
+#   - Go router intercepts HTTPS traffic from Claude Code via MITM CONNECT.
+#   - Requests without a routing marker go straight to api.anthropic.com.
+#   - Requests *with* a marker like
+#         <!-- @proxy-local-route:af83e9 model=LABEL -->
+#     in the system field are forwarded to a local musistudio/claude-code-router
+#     egress at http://127.0.0.1:3456/v1/messages. musistudio owns all
+#     Anthropic↔OpenAI translation and provider-specific quirks.
 #
-# Model labels are what you put in the routing marker:
-#   <!-- @proxy-local-route:af83e9 model=LABEL -->
+# The Go router's only job on the local-route path is:
+#   (1) resolve LABEL → (provider-name, backend-model),
+#   (2) rewrite the request body's `model` field to musistudio's
+#       "<provider-name>,<backend-model>" selector,
+#   (3) set x-api-key and forward.
+#
+# Provider `name` MUST match a provider declared in musistudio's config.json.
+
+# Optional global egress settings. Shared defaults when a provider does not
+# override them. Defaults shown are the ones used when this section is absent.
+# egress:
+#   url: http://127.0.0.1:3456        # default
+#   api_key: ${MUSISTUDIO_APIKEY}     # set if musistudio's APIKEY is configured
 
 providers:
 
   # ─── Ollama (local) ──────────────────────────────────────────────────
-  # No API key needed. Works with any model you've pulled.
+  # Declare the musistudio provider-name (`ollama`) and a mapping from the
+  # short label used in routing markers to the backend model id.
   #
   # - name: ollama
-  #   endpoint: http://localhost:11434/v1
-  #   transform: ["cleancache", "schema:generic"]
   #   models:
   #     fast: qwen3:32b
-  #     reasoning:
-  #       model: deepseek-r1:14b
-  #       transform: ["cleancache", "extrathinktag", "enhancetool", "schema:generic"]
+  #     reasoning: deepseek-r1:14b
 
   # ─── DeepSeek ────────────────────────────────────────────────────────
-  # deepseek:   renames max_completion_tokens → max_tokens (DeepSeek uses legacy name)
-  # reasoning:  converts reasoning_content → Anthropic thinking blocks
-  # enhancetool: repairs malformed tool call JSON (common with reasoning models)
-  #
   # - name: deepseek
-  #   endpoint: https://api.deepseek.com/v1
-  #   api_key: ${DEEPSEEK_API_KEY}
-  #   transform: ["cleancache", "deepseek", "reasoning", "enhancetool", "schema:generic"]
   #   models:
   #     reasoner: deepseek-reasoner
-  #     chat:
-  #       model: deepseek-chat
-  #       # deepseek-chat doesn't reason natively; use tooluse + forcereasoning if needed
-  #       transform: ["cleancache", "deepseek", "tooluse", "forcereasoning", "enhancetool", "schema:generic"]
+  #     chat: deepseek-chat
 
-  # ─── OpenAI ──────────────────────────────────────────────────────────
-  # Most OpenAI models work with minimal transforms.
-  # schema:openai only strips "strict" (OpenAI supports most schema fields).
-  #
+  # ─── OpenAI / Azure / anything OpenAI-compatible ─────────────────────
   # - name: openai
-  #   endpoint: https://api.openai.com/v1
-  #   api_key: ${OPENAI_API_KEY}
-  #   transform: ["cleancache", "schema:openai"]
   #   models:
   #     gpt4: gpt-4.1
   #     mini: gpt-4.1-mini
 
   # ─── OpenRouter ──────────────────────────────────────────────────────
-  # openrouter: fixes numeric tool IDs, renames reasoning field, corrects finish_reason
-  # Add reasoning/extrathinktag per-model depending on whether the model reasons.
-  #
   # - name: openrouter
-  #   endpoint: https://openrouter.ai/api/v1
-  #   api_key: ${OPENROUTER_API_KEY}
-  #   transform: ["cleancache", "openrouter", "enhancetool", "schema:generic"]
   #   models:
   #     llama: meta-llama/llama-4-maverick
-  #     deepseek:
-  #       model: deepseek/deepseek-r1
-  #       transform: ["cleancache", "openrouter", "reasoning", "enhancetool", "schema:generic"]
+  #     deepseek: deepseek/deepseek-r1
 
   # ─── Groq ────────────────────────────────────────────────────────────
-  # groq: strips $schema from tool params, fixes numeric tool IDs
-  #
   # - name: groq
-  #   endpoint: https://api.groq.com/openai/v1
-  #   api_key: ${GROQ_API_KEY}
-  #   transform: ["cleancache", "groq", "enhancetool", "schema:generic"]
   #   models:
   #     llama: llama-3.3-70b-versatile
 
-  # ─── Custom params example ──────────────────────────────────────────
-  # Use customparams + params to inject arbitrary fields into the request body.
-  # Only new keys are added — existing fields (model, messages, etc.) are never
-  # overwritten. Per-model params override provider-level params.
-  #
-  # - name: custom-example
-  #   endpoint: https://api.example.com/v1
-  #   api_key: ${EXAMPLE_API_KEY}
-  #   transform: ["customparams", "cleancache", "schema:generic"]
-  #   params:
-  #     top_k: 40
-  #     presence_penalty: 0.5
+  # ─── Gemini ──────────────────────────────────────────────────────────
+  # - name: gemini
   #   models:
-  #     default: example-model
-  #     creative:
-  #       model: example-model
-  #       params:
-  #         top_k: 80
-  #         temperature: 0.9
+  #     pro: gemini-1.5-pro
+  #     flash: gemini-2.5-flash
+
+  # ─── Per-provider overrides ──────────────────────────────────────────
+  # `max_tokens` caps max_tokens for this provider (client asks can only be
+  # lowered, never raised). `endpoint` and `api_key` let you point specific
+  # providers at a non-default musistudio instance (useful for split
+  # self-hosted + shared setups).
+  #
+  # - name: custom-router
+  #   endpoint: https://egress.internal.example.com
+  #   api_key: ${CUSTOM_EGRESS_KEY}
+  #   max_tokens: 8192
+  #   models:
+  #     big: my-custom-model
+
+  # ─── Exa-safe research wrapper ───────────────────────────────────────
+  # Force research through an Exa-backed command bridge that returns a
+  # normalized evidence envelope instead of dumping raw page text.
+  #
+  # - name: exa
+  #   command: "exa-safe-wrapper --query '$PROMPT'"
+  #   exa:
+  #     mode: envelope
+  #     default_full_text: false
+  #     allow_full_text: true
+  #     full_text_on_low_signal: true
+  #     min_highlight_chars: 300
+  #     default_num_results: 5
+  #     max_num_results: 10
+  #     search_type: auto
+  #     enable_highlights: true
+  #     enable_summary: true
+  #     highlights_max_characters: 1200
+  #     text_max_characters: 0
+  #     max_age_hours: 24
+  #   models:
+  #     research: exa-research
+
+  # ─── Command bridge (unchanged by the musistudio migration) ──────────
+  # Command providers do NOT hit musistudio — they short-circuit into a
+  # Bash tool_use so Claude Code runs a shell command (e.g. `opencode run`).
+  #
+  # - name: my-agents
+  #   command: "opencode run --agent $AGENT --format json '$PROMPT'"
+  #   models:
+  #     simplifier: simplifier
+  #     reviewer: architecture-reviewer
+
+# ─── Expert bypass ─────────────────────────────────────────────────────
+# If you declared a custom router entry inside musistudio that itself uses
+# the "provider,model" form, pass the comma-form verbatim — the Go router
+# leaves model strings containing a comma alone.
+#
+#   models:
+#     glm: Z/glm-4.5,direct     # sent as-is, no auto-prefix

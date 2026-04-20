@@ -10,3 +10,14 @@ certs/
 /claude-hybrid
 coverage.out
 SPEC.md
+
+# musistudio egress runtime artifacts (created by the container on first run)
+/deploy/musistudio-config/logs/
+/deploy/musistudio-config/plugins/
+/deploy/.env
+
+# Musistudio config (API keys)
+deploy/musistudio-config/config.json
+
+# Deleted files
+.deleted/

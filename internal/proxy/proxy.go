@@ -3,12 +3,12 @@ package proxy
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"regexp"
@@ -18,7 +18,6 @@ import (
 
 	"github.com/peter-wagstaff/claude-hybrid-router/internal/config"
 	"github.com/peter-wagstaff/claude-hybrid-router/internal/mitm"
-	"github.com/peter-wagstaff/claude-hybrid-router/internal/translate"
 )
 
 // Proxy is an HTTP handler that handles CONNECT requests with MITM TLS.
@@ -75,8 +74,14 @@ func New(cache *mitm.CertCache, opts ...Option) *Proxy {
 		}
 	}
 	if p.localClient == nil {
+		egressTimeout := config.UpstreamTimeout
+		if p.modelResolver != nil {
+			egressTimeout = p.modelResolver.Timeout()
+		}
 		p.localClient = &http.Client{
-			Timeout: config.UpstreamTimeout,
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: egressTimeout,
+			},
 		}
 	}
 	return p
@@ -201,6 +206,28 @@ func (p *Proxy) handleTunnel(tlsConn net.Conn, host, port string) {
 		tlsConn.SetDeadline(deadlineFromNow(config.ClientRecvTimeout))
 
 		routeModel, strippedBody := detectLocalRoute(body)
+
+		// route_all: if no marker found but route_all is configured and this is
+		// an Anthropic /v1/messages request, force-route to the configured label.
+		// Non-messages endpoints (telemetry, MCP registry, etc.) pass through upstream.
+		if routeModel == "" && p.modelResolver != nil && p.modelResolver.RouteAll() != "" &&
+			isAPIHost(host) && req.URL.Path == "/v1/messages" {
+			routeModel = p.modelResolver.RouteAll()
+			strippedBody = body // no marker to strip
+		}
+
+		// System prompt override: replace the system field before forwarding.
+		if routeModel != "" && p.modelResolver != nil && p.modelResolver.SystemPrompt() != "" &&
+			req.Method == "POST" {
+			strippedBody = rewriteSystemPrompt(strippedBody, p.modelResolver.SystemPrompt())
+		}
+
+		// Reminder injection: append <system-reminder> to messages containing tool_result.
+		if routeModel != "" && p.modelResolver != nil && p.modelResolver.Reminder() != "" &&
+			req.Method == "POST" {
+			strippedBody = injectReminder(strippedBody, p.modelResolver.Reminder())
+		}
+
 		if routeModel != "" {
 			streamMode := "non-streaming"
 			var reqMeta struct {
@@ -212,7 +239,11 @@ func (p *Proxy) handleTunnel(tlsConn net.Conn, host, port string) {
 			log.Printf("LOCAL_ROUTE %s https://%s:%s%s → model=%s (%s)",
 				req.Method, host, port, req.URL.RequestURI(), routeModel, streamMode)
 
-			p.forwardLocal(tlsConn, routeModel, strippedBody)
+			var reqModel struct {
+				Model string `json:"model"`
+			}
+			json.Unmarshal(strippedBody, &reqModel)
+			p.forwardLocal(tlsConn, routeModel, strippedBody, reqModel.Model)
 		} else {
 			if !p.forwardUpstream(tlsConn, host, port, req, body) {
 				return
@@ -346,7 +377,13 @@ func writeResponseHeadersWithCL(w io.Writer, resp *http.Response, bodyLen int) {
 	fmt.Fprint(w, "\r\n")
 }
 
-func (p *Proxy) forwardLocal(w io.Writer, modelLabel string, body []byte) {
+// forwardLocal handles a request whose system field carried a routing marker.
+// After the musistudio egress migration, the Anthropic request body is sent
+// verbatim to the configured musistudio /v1/messages endpoint — only the
+// `model` field is rewritten to musistudio's "<provider>,<model>" selector.
+// musistudio handles Anthropic↔OpenAI translation, provider quirks, SSE rewrites,
+// tool-use normalization, fallback, etc.
+func (p *Proxy) forwardLocal(w io.Writer, modelLabel string, body []byte, originalModel string) {
 	if p.modelResolver == nil {
 		// No config — fall back to stub response
 		isStreaming := false
@@ -365,13 +402,13 @@ func (p *Proxy) forwardLocal(w io.Writer, modelLabel string, body []byte) {
 	resolved, err := p.modelResolver.Resolve(modelLabel)
 	if err != nil {
 		log.Printf("model resolution failed: %v", err)
-		errBody := translate.FormatError("invalid_request_error",
+		errBody := formatError("invalid_request_error",
 			fmt.Sprintf("Unknown model label %q — check ~/.claude-hybrid/config.yaml", modelLabel))
 		sendAnthropicError(w, 400, errBody)
 		return
 	}
 
-	// Command bridge: skip all translation, return tool_use for Bash
+	// Command bridge short-circuit: return tool_use for Bash, bypass egress.
 	if resolved.Command != "" {
 		isStreaming := false
 		var data map[string]interface{}
@@ -380,153 +417,241 @@ func (p *Proxy) forwardLocal(w io.Writer, modelLabel string, body []byte) {
 				isStreaming = s
 			}
 		}
+		// Command providers historically stored the agent name under Model;
+		// keep that contract untouched.
 		p.forwardCommand(w, resolved.Command, resolved.Model, modelLabel, body, isStreaming)
 		return
 	}
 
-	// Build transform chain
-	chain, err := translate.BuildChain(resolved.Transform)
+	// Rewrite the Anthropic body for musistudio: swap `model` → "<prov>,<model>",
+	// optionally cap max_tokens. Everything else passes through untouched.
+	egressBody, isStreaming, err := rewriteBodyForEgress(body, resolved.Model, resolved.MaxTokens)
 	if err != nil {
-		log.Printf("transform chain build failed for %v: %v — falling back to no transforms", resolved.Transform, err)
-		chain = translate.NewTransformChain()
-	}
-	ctx := translate.NewTransformContext(resolved.Model, resolved.Provider)
-	ctx.Params = resolved.Params
-
-	// Translate request body
-	oaiBody, err := translate.RequestToOpenAI(body, resolved.Model, resolved.MaxTokens)
-	if err != nil {
-		log.Printf("request translation failed: %v", err)
-		errBody := translate.FormatError("api_error", fmt.Sprintf("Request translation failed: %v", err))
-		sendAnthropicError(w, 500, errBody)
+		log.Printf("[LOCAL_ERR:PARSE] body rewrite failed for %s: %v", modelLabel, err)
+		errBody := formatError("invalid_request_error",
+			fmt.Sprintf("Failed to parse request body: %v", err))
+		sendAnthropicError(w, 400, errBody)
 		return
 	}
 
-	// Run request transforms
-	var oaiReq map[string]interface{}
-	if err := json.Unmarshal(oaiBody, &oaiReq); err == nil {
-		if err := chain.RunRequest(oaiReq, ctx); err != nil {
-			log.Printf("[LOCAL_ERR:TRANSLATE] request transform failed for %s: %v", modelLabel, err)
-			errBody := translate.FormatError("api_error",
-				fmt.Sprintf("[TRANSLATE] Request transform failed for '%s': %v", modelLabel, err))
+	endpoint := resolved.Endpoint + "/v1/messages"
+	maxAttempts := 1 + config.EgressMaxRetries
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		localReq, err := http.NewRequest("POST", endpoint, strings.NewReader(string(egressBody)))
+		if err != nil {
+			log.Printf("failed to create egress request: %v", err)
+			errBody := formatError("api_error", fmt.Sprintf("Failed to create request: %v", err))
 			sendAnthropicError(w, 500, errBody)
 			return
 		}
-		oaiBody, _ = json.Marshal(oaiReq)
-	}
-
-	// Determine if streaming
-	isStreaming := false
-	var data map[string]interface{}
-	if json.Unmarshal(body, &data) == nil {
-		if s, ok := data["stream"].(bool); ok {
-			isStreaming = s
+		localReq.Header.Set("Content-Type", "application/json")
+		localReq.Header.Set("anthropic-version", "2023-06-01")
+		if resolved.APIKey != "" {
+			localReq.Header.Set("x-api-key", resolved.APIKey)
 		}
-	}
 
-	// Build request to local provider
-	endpoint := resolved.Endpoint + "/chat/completions"
-	localReq, err := http.NewRequest("POST", endpoint, strings.NewReader(string(oaiBody)))
-	if err != nil {
-		log.Printf("failed to create local request: %v", err)
-		errBody := translate.FormatError("api_error", fmt.Sprintf("Failed to create request: %v", err))
-		sendAnthropicError(w, 500, errBody)
-		return
-	}
-	localReq.Header.Set("Content-Type", "application/json")
-	if resolved.APIKey != "" {
-		localReq.Header.Set("Authorization", "Bearer "+resolved.APIKey)
-	}
-
-	resp, err := p.localClient.Do(localReq)
-	if err != nil {
-		cat := translate.ClassifyError(err)
-		log.Printf("[LOCAL_ERR:%s] %s unreachable: %v (%s)", cat, modelLabel, err, endpoint)
-		errBody := translate.FormatError("api_error",
-			fmt.Sprintf("[%s] Local model '%s' unreachable: %v (%s)", cat, modelLabel, err, endpoint))
-		sendAnthropicError(w, 502, errBody)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		sanitized := sanitizeForLog(string(respBody))
-		log.Printf("[LOCAL_ERR:HTTP_%d] %s returned %d: %s", resp.StatusCode, modelLabel, resp.StatusCode, sanitized)
-		errBody := translate.FormatError("api_error",
-			fmt.Sprintf("[HTTP_%d] Local provider '%s' returned %d: %s", resp.StatusCode, modelLabel, resp.StatusCode, sanitized))
-		// Map provider client errors (4xx) to 400 so the caller treats them
-		// as non-retryable.  We can't forward the raw code (e.g. 401) because
-		// the client thinks it's talking to Anthropic and may retry auth
-		// errors.  Server errors (5xx) become 502 to indicate upstream failure.
-		code := 502
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			code = 400
+		resp, err := p.localClient.Do(localReq)
+		if err != nil {
+			cat := classifyError(err)
+			// Never retry on transport-level errors (timeouts, connection refused).
+			// These already waited 120s — retrying would multiply the wait.
+			log.Printf("[LOCAL_ERR:%s] egress unreachable for %s: %v (%s)", cat, modelLabel, err, endpoint)
+			errBody := formatError("api_error",
+				fmt.Sprintf("[%s] Egress '%s' unreachable: %v (%s)", cat, modelLabel, err, endpoint))
+			sendAnthropicError(w, 502, errBody)
+			return
 		}
-		sendAnthropicError(w, code, errBody)
-		return
-	}
 
-	if isStreaming {
-		// Stream: translate OpenAI SSE → Anthropic SSE
-		var sseBuf bytes.Buffer
-		st := translate.NewStreamTranslator(modelLabel)
-		st.SetVerbose(p.verbose)
-		st.SetTransformChain(chain, ctx)
-		streamErr := st.TranslateStream(resp.Body, &sseBuf)
-		sseBody := sseBuf.Bytes()
-		if streamErr != nil {
-			cat := translate.ClassifyError(streamErr)
-			log.Printf("[LOCAL_ERR:%s] stream translation error for %s: %v", cat, modelLabel, streamErr)
-			if len(sseBody) == 0 {
-				errBody := translate.FormatError("api_error",
-					fmt.Sprintf("[%s] Stream translation failed for '%s': %v", cat, modelLabel, streamErr))
-				sendAnthropicError(w, 502, errBody)
-				return
+		if isRetryableStatus(resp.StatusCode) && attempt < maxAttempts {
+			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			delay := retryDelay(attempt)
+			log.Printf("[LOCAL_RETRY:%d/%d] egress %s returned %d — retrying in %v (body: %s)",
+				attempt, maxAttempts, modelLabel, resp.StatusCode, delay, sanitizeForLog(string(respBody)))
+			time.Sleep(delay)
+			continue
+		}
+
+		if resp.StatusCode != 200 {
+			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			sanitized := sanitizeForLog(string(respBody))
+			log.Printf("[LOCAL_ERR:HTTP_%d] egress %s returned %d: %s", resp.StatusCode, modelLabel, resp.StatusCode, sanitized)
+			forwarded := respBody
+			if !isAnthropicError(respBody) {
+				forwarded = formatError("api_error",
+					fmt.Sprintf("[HTTP_%d] Egress '%s' returned %d: %s", resp.StatusCode, modelLabel, resp.StatusCode, sanitized))
 			}
-			sseBody = append(sseBody, translate.FormatStreamError("api_error",
-				fmt.Sprintf("[%s] Stream interrupted for '%s': %v", cat, modelLabel, streamErr))...)
-		}
-		fmt.Fprintf(w, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: %d\r\n\r\n", len(sseBody))
-		w.Write(sseBody)
-		if streamErr == nil {
-			log.Printf("LOCAL_OK %s → %s/%s (streaming, %dms)",
-				modelLabel, resolved.Provider, resolved.Model, time.Since(start).Milliseconds())
-		}
-	} else {
-		// Non-streaming: translate response
-		respBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodyBytes+1))
-		if err != nil {
-			cat := translate.ClassifyError(err)
-			log.Printf("[LOCAL_ERR:%s] response read error for %s: %v", cat, modelLabel, err)
-			errBody := translate.FormatError("api_error",
-				fmt.Sprintf("[%s] Failed to read response from '%s': %v", cat, modelLabel, err))
-			sendAnthropicError(w, 502, errBody)
+			code := 502
+			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+				code = 400
+			}
+			sendAnthropicError(w, code, forwarded)
 			return
 		}
-		respBody, _ = chain.RunResponse(respBody, ctx)
-		aBody, err := translate.ResponseToAnthropic(respBody, modelLabel)
-		if err != nil {
-			log.Printf("[LOCAL_ERR:TRANSLATE] response translation failed for %s: %v", modelLabel, err)
-			errBody := translate.FormatError("api_error",
-				fmt.Sprintf("[TRANSLATE] Response translation failed for '%s': %v", modelLabel, err))
-			sendAnthropicError(w, 502, errBody)
+
+		if err := resp.Write(w); err != nil {
+			resp.Body.Close()
+			cat := classifyError(err)
+			log.Printf("[LOCAL_ERR:%s] response write for %s: %v", cat, modelLabel, err)
 			return
 		}
-		fmt.Fprintf(w, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", len(aBody))
-		w.Write(aBody)
-		// Extract token usage from translated response
-		var aResp struct {
-			Usage struct {
-				InputTokens  int `json:"input_tokens"`
-				OutputTokens int `json:"output_tokens"`
-			} `json:"usage"`
+		resp.Body.Close()
+		streamTag := ""
+		if isStreaming {
+			streamTag = "streaming, "
 		}
-		json.Unmarshal(aBody, &aResp)
-		log.Printf("LOCAL_OK %s → %s/%s (%dms, in=%d out=%d tokens)",
-			modelLabel, resolved.Provider, resolved.Model, time.Since(start).Milliseconds(),
-			aResp.Usage.InputTokens, aResp.Usage.OutputTokens)
+		retryTag := ""
+		if attempt > 1 {
+			retryTag = fmt.Sprintf("retry %d, ", attempt-1)
+		}
+		log.Printf("LOCAL_OK %s → %s/%s (%s%s%dms)",
+			modelLabel, resolved.Provider, resolved.Model, retryTag, streamTag, time.Since(start).Milliseconds())
+		return
 	}
+}
+
+// rewriteResponseModel replaces the "model" field in an Anthropic JSON response
+// with the original Claude model name so Claude Code accepts it.
+func rewriteResponseModel(body []byte, model string) []byte {
+	var data map[string]interface{}
+	if json.Unmarshal(body, &data) != nil {
+		return body
+	}
+	if _, ok := data["model"]; ok {
+		data["model"] = model
+		if out, err := json.Marshal(data); err == nil {
+			return out
+		}
+	}
+	return body
+}
+
+// injectReminder appends a <system-reminder> text block to every user message
+// that contains a tool_result content block. This ensures the reminder is
+// present on every tool call round-trip back to the API.
+func injectReminder(body []byte, reminder string) []byte {
+	var data map[string]interface{}
+	if json.Unmarshal(body, &data) != nil {
+		return body
+	}
+	messages, ok := data["messages"].([]interface{})
+	if !ok || len(messages) == 0 {
+		return body
+	}
+	reminderBlock := map[string]interface{}{
+		"type": "text",
+		"text": "<system-reminder>\n" + reminder + "\n</system-reminder>",
+	}
+	modified := false
+	for i, msg := range messages {
+		m, ok := msg.(map[string]interface{})
+		if !ok || m["role"] != "user" {
+			continue
+		}
+		content, ok := m["content"].([]interface{})
+		if !ok {
+			continue
+		}
+		hasToolResult := false
+		for _, block := range content {
+			if bm, ok := block.(map[string]interface{}); ok {
+				if bm["type"] == "tool_result" {
+					hasToolResult = true
+					break
+				}
+			}
+		}
+		if hasToolResult {
+			m["content"] = append(content, reminderBlock)
+			messages[i] = m
+			modified = true
+		}
+	}
+	if !modified {
+		return body
+	}
+	data["messages"] = messages
+	out, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// rewriteSystemPrompt replaces the system field in the request body.
+func rewriteSystemPrompt(body []byte, newSystem string) []byte {
+	var data map[string]interface{}
+	if json.Unmarshal(body, &data) != nil {
+		return body
+	}
+	data["system"] = newSystem
+	out, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+var modelFieldRe = regexp.MustCompile(`"model"\s*:\s*"[^"]*"`)
+
+// streamWithModelRewrite reads the first chunk from src, replaces the model
+// field, writes it to dst, then copies the rest with io.Copy. No buffering.
+func streamWithModelRewrite(dst io.Writer, src io.Reader, targetModel string) error {
+	buf := make([]byte, 16*1024)
+	n, err := src.Read(buf)
+	if n > 0 {
+		chunk := buf[:n]
+		chunk = modelFieldRe.ReplaceAll(chunk, []byte(`"model":"`+targetModel+`"`))
+		if _, werr := dst.Write(chunk); werr != nil {
+			return werr
+		}
+	}
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(dst, src)
+	return err
+}
+
+// rewriteBodyForEgress swaps the model field for musistudio's "<provider>,<model>"
+// format and optionally caps max_tokens. Returns the new body, the stream flag,
+// and any parse error. Unknown fields are preserved verbatim.
+func rewriteBodyForEgress(body []byte, egressModel string, maxTokensCap int) ([]byte, bool, error) {
+	var data map[string]interface{}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, false, err
+	}
+	data["model"] = egressModel
+	if maxTokensCap > 0 {
+		// Only cap if the client asked for more — never raise.
+		if current, ok := data["max_tokens"].(float64); ok {
+			if int(current) > maxTokensCap {
+				data["max_tokens"] = maxTokensCap
+			}
+		} else if _, exists := data["max_tokens"]; !exists {
+			data["max_tokens"] = maxTokensCap
+		}
+	}
+	isStreaming := false
+	if s, ok := data["stream"].(bool); ok {
+		isStreaming = s
+	}
+	out, err := json.Marshal(data)
+	return out, isStreaming, err
+}
+
+// isAnthropicError returns true if body matches {"type":"error","error":{...}}.
+func isAnthropicError(body []byte) bool {
+	var probe struct {
+		Type  string          `json:"type"`
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return false
+	}
+	return probe.Type == "error" && len(probe.Error) > 0
 }
 
 func sendAnthropicError(w io.Writer, httpStatus int, body []byte) {
@@ -549,6 +674,23 @@ func (p *Proxy) logVerbose(format string, args ...interface{}) {
 	if p.verbose {
 		log.Printf(format, args...)
 	}
+}
+
+// isRetryableStatus returns true for HTTP status codes worth retrying.
+// 499 = client closed (musistudio's upstream timeout), 500-503 = server errors.
+func isRetryableStatus(code int) bool {
+	return code == 499 || (code >= 500 && code <= 503)
+}
+
+// retryDelay returns the backoff duration for a given attempt (1-based).
+// Uses exponential backoff with jitter: base * 2^(attempt-1) + random jitter.
+func retryDelay(attempt int) time.Duration {
+	base := config.EgressRetryBaseMs
+	for i := 1; i < attempt; i++ {
+		base *= 2
+	}
+	jitter := rand.Intn(config.EgressRetryJitter + 1)
+	return time.Duration(base+jitter) * time.Millisecond
 }
 
 // isAPIHost returns true for hosts where upstream errors are worth logging.

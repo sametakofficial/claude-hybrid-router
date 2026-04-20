@@ -8,6 +8,8 @@ import (
 	"math/rand"
 	"strings"
 	"time"
+
+	"github.com/peter-wagstaff/claude-hybrid-router/internal/config"
 )
 
 // forwardCommand handles requests for command bridge providers.
@@ -31,8 +33,13 @@ func (p *Proxy) forwardCommand(w io.Writer, command, agentName, modelLabel strin
 		toolOutput := extractToolResult(body)
 		displayText := toolOutput
 		if opencode {
-			sessionID, text := parseOpencodeOutput(toolOutput)
-			if sessionID != "" {
+			sessionID, text, errored := parseOpencodeOutput(toolOutput)
+			failed := isOpencodeFailure(sessionID, text, toolOutput, errored)
+			if failed {
+				prior := defaultOpencodeSessions.Get(agentName)
+				defaultOpencodeSessions.Forget(agentName)
+				log.Printf("COMMAND_TURN2 %s → opencode failure detected, forgot session %q (text=%d chars, errored=%v)", modelLabel, prior, len(text), errored)
+			} else if sessionID != "" {
 				defaultOpencodeSessions.Set(agentName, sessionID)
 				log.Printf("COMMAND_TURN2 %s → cached opencode session %s (text=%d chars)", modelLabel, sessionID, len(text))
 			} else {
@@ -44,6 +51,13 @@ func (p *Proxy) forwardCommand(w io.Writer, command, agentName, modelLabel strin
 		} else {
 			log.Printf("COMMAND_TURN2 %s → returning tool result as text (%d chars)", modelLabel, len(displayText))
 		}
+		resolved := config.ResolvedModel{Provider: modelLabel}
+		if p.modelResolver != nil {
+			if rm, err := p.modelResolver.Resolve(modelLabel); err == nil {
+				resolved = rm
+			}
+		}
+		displayText = maybeNormalizeExaToolResult(displayText, resolved)
 		if isStreaming {
 			writeSSEText(w, modelLabel, displayText)
 		} else {
@@ -261,6 +275,7 @@ func writeJSONToolUse(w io.Writer, model, command string) {
 				"input": map[string]interface{}{
 					"command":     command,
 					"description": "Running command bridge",
+					"timeout":     config.CommandBridgeTimeoutMS,
 				},
 			},
 		},
@@ -299,6 +314,7 @@ func writeSSEToolUse(w io.Writer, model, command string) {
 	inputJSON, _ := json.Marshal(map[string]interface{}{
 		"command":     command,
 		"description": "Running command bridge",
+		"timeout":     config.CommandBridgeTimeoutMS,
 	})
 
 	events := []struct {

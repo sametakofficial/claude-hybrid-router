@@ -133,12 +133,14 @@ func injectSessionFlag(cmd, sessionID string) string {
 }
 
 // parseOpencodeOutput walks newline-delimited JSON events from `opencode
-// run --format json` and returns (sessionID, assistantText). Non-JSON
-// lines (warnings, stray stderr) are skipped silently. If the output
-// contains no JSON at all we return ("", raw) so the caller can fall
-// back to treating it as plain text — preserves backward compatibility
-// with the pre-sessions behaviour of this bridge.
-func parseOpencodeOutput(out string) (sessionID, text string) {
+// run --format json` and returns (sessionID, assistantText, errored).
+// Non-JSON lines (warnings, stray stderr) are skipped silently. If the
+// output contains no JSON at all we return ("", raw, false) so the
+// caller can fall back to treating it as plain text — preserves
+// backward compatibility with the pre-sessions behaviour of this bridge.
+// errored is true when any JSON event carried a non-nil Error field,
+// signalling opencode itself reported a failure.
+func parseOpencodeOutput(out string) (sessionID, text string, errored bool) {
 	var textParts []string
 	sawJSON := false
 	for _, line := range strings.Split(out, "\n") {
@@ -154,14 +156,37 @@ func parseOpencodeOutput(out string) (sessionID, text string) {
 		if ev.SessionID != "" && sessionID == "" {
 			sessionID = ev.SessionID
 		}
+		if ev.Error != nil {
+			errored = true
+		}
 		if ev.Type == "text" && ev.Part.Text != "" {
 			textParts = append(textParts, ev.Part.Text)
 		}
 	}
 	if !sawJSON {
-		return "", out
+		return "", out, false
 	}
-	return sessionID, strings.Join(textParts, "")
+	return sessionID, strings.Join(textParts, ""), errored
+}
+
+// isOpencodeFailure decides whether a Turn 2 tool_result indicates the
+// opencode invocation failed such that any cached session for this
+// agent should be forgotten (avoid resuming into a broken session on
+// the next turn). Signals:
+//   - Claude Code's Bash tool timeout prefix in the raw output
+//   - no session captured AND no assistant text (opencode never ran)
+//   - opencode itself emitted an error event
+func isOpencodeFailure(sessionID, text, rawOut string, errored bool) bool {
+	if errored {
+		return true
+	}
+	if strings.Contains(rawOut, "Command timed out") {
+		return true
+	}
+	if sessionID == "" && strings.TrimSpace(text) == "" {
+		return true
+	}
+	return false
 }
 
 type opencodeEvent struct {

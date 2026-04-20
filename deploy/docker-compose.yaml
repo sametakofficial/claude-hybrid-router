@@ -1,0 +1,48 @@
+# musistudio/claude-code-router as the egress sidecar for claude-hybrid-router.
+#
+# Start:   docker compose -f deploy/docker-compose.yaml up -d
+# Stop:    docker compose -f deploy/docker-compose.yaml down
+# Logs:    docker compose -f deploy/docker-compose.yaml logs -f
+# Health:  curl http://127.0.0.1:3456/health
+#
+# claude-hybrid-router talks to this container at http://127.0.0.1:3456. Every
+# marker-routed request becomes `POST /v1/messages` with the Anthropic body
+# unchanged, except `model` is rewritten to "<provider-name>,<backend-model>"
+# so musistudio knows which Provider entry below to dispatch to.
+
+services:
+  claude-egress:
+    image: musistudio/claude-code-router:latest
+    container_name: claude-code-router
+    # Bind on loopback only — the egress holds provider API keys and should
+    # not be reachable from other hosts on the LAN.
+    network_mode: host
+    volumes:
+      # musistudio reads config from ~/.claude-code-router/config.json,
+      # which inside the official image resolves to /root/.claude-code-router.
+      # Keeping this as a bind-mount (not a named volume) means edits on the
+      # host are picked up on container restart.
+      - ./musistudio-config:/root/.claude-code-router
+    environment:
+      # Accept connections inside the container on all interfaces; the
+      # published port above restricts external access to 127.0.0.1.
+      HOST: "0.0.0.0"
+      PORT: "3456"
+      LOG: "true"
+      LOG_LEVEL: "info"
+      # Provider API keys are expanded from ${VAR} references in
+      # musistudio-config/config.json; export them in your shell or in a
+      # .env file next to this compose file before `up`.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      MUSISTUDIO_APIKEY: ${MUSISTUDIO_APIKEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3456/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3

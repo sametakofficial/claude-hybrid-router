@@ -245,7 +245,10 @@ func TestParseOpencodeOutput_RealJSON(t *testing.T) {
 {"type":"text","timestamp":1776446881564,"sessionID":"ses_26383f28fffe9EmYWW7Vjlue1u","part":{"type":"text","text":"Hello there, friend"}}
 {"type":"step_finish","timestamp":1776446881621,"sessionID":"ses_26383f28fffe9EmYWW7Vjlue1u","part":{"type":"step-finish","reason":"stop"}}`
 
-	sid, text := parseOpencodeOutput(out)
+	sid, text, errored := parseOpencodeOutput(out)
+	if errored {
+		t.Errorf("unexpected errored=true on clean stream")
+	}
 	if sid != "ses_26383f28fffe9EmYWW7Vjlue1u" {
 		t.Errorf("sessionID: got %q", sid)
 	}
@@ -257,7 +260,7 @@ func TestParseOpencodeOutput_RealJSON(t *testing.T) {
 func TestParseOpencodeOutput_MultipleTextParts(t *testing.T) {
 	out := `{"type":"text","sessionID":"ses_1","part":{"type":"text","text":"A "}}
 {"type":"text","sessionID":"ses_1","part":{"type":"text","text":"B"}}`
-	sid, text := parseOpencodeOutput(out)
+	sid, text, _ := parseOpencodeOutput(out)
 	if sid != "ses_1" || text != "A B" {
 		t.Errorf("got sid=%q text=%q", sid, text)
 	}
@@ -265,9 +268,12 @@ func TestParseOpencodeOutput_MultipleTextParts(t *testing.T) {
 
 func TestParseOpencodeOutput_ErrorEventStillCarriesSessionID(t *testing.T) {
 	out := `{"type":"error","sessionID":"ses_err","error":{"name":"APIError"}}`
-	sid, _ := parseOpencodeOutput(out)
+	sid, _, errored := parseOpencodeOutput(out)
 	if sid != "ses_err" {
 		t.Errorf("expected error event to still yield sessionID, got %q", sid)
+	}
+	if !errored {
+		t.Errorf("expected errored=true on error event")
 	}
 }
 
@@ -275,7 +281,7 @@ func TestParseOpencodeOutput_NonJSONFallback(t *testing.T) {
 	// Legacy non-json output should come back verbatim so we don't
 	// accidentally regress the existing --format default path.
 	out := "[93m! [0m agent simplifier not found\nsome other warning"
-	sid, text := parseOpencodeOutput(out)
+	sid, text, _ := parseOpencodeOutput(out)
 	if sid != "" {
 		t.Errorf("no JSON — sessionID should be empty, got %q", sid)
 	}
@@ -350,12 +356,111 @@ func TestOpencodeSessionReuseAcrossTurns(t *testing.T) {
 	}
 }
 
+func TestIsOpencodeFailure(t *testing.T) {
+	cases := []struct {
+		name    string
+		sid     string
+		text    string
+		raw     string
+		errored bool
+		want    bool
+	}{
+		{"clean success", "ses_1", "answer", "...json...", false, false},
+		{"error event", "ses_1", "partial", "", true, true},
+		{"bash timeout marker", "", "", "Command timed out after 10m 0.0s", false, true},
+		{"no session and no text", "", "", "", false, true},
+		{"no session but text present", "", "fallback plain text", "fallback plain text", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isOpencodeFailure(tc.sid, tc.text, tc.raw, tc.errored)
+			if got != tc.want {
+				t.Errorf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestForwardCommandTurn2_ForgetsSessionOnTimeout(t *testing.T) {
+	orig := defaultOpencodeSessions
+	defaultOpencodeSessions = newOpencodeSessionCache()
+	t.Cleanup(func() { defaultOpencodeSessions = orig })
+
+	defaultOpencodeSessions.Set("simplifier", "ses_old")
+
+	tmpl := "opencode run --agent $AGENT --format default --dir /x '$PROMPT'"
+	body := mustMarshalToolResultBody(t, "Command timed out after 10m 0.0s\n\n<stderr>opencode hung</stderr>")
+
+	var buf strings.Builder
+	(&Proxy{}).forwardCommand(&buf, tmpl, "simplifier", "oc_simplify", body, false)
+
+	if got := defaultOpencodeSessions.Get("simplifier"); got != "" {
+		t.Fatalf("expected session forgotten on timeout, still have %q", got)
+	}
+}
+
+func TestForwardCommandTurn2_ForgetsSessionOnEmptyOutput(t *testing.T) {
+	orig := defaultOpencodeSessions
+	defaultOpencodeSessions = newOpencodeSessionCache()
+	t.Cleanup(func() { defaultOpencodeSessions = orig })
+
+	defaultOpencodeSessions.Set("simplifier", "ses_old")
+
+	tmpl := "opencode run --agent $AGENT --format default --dir /x '$PROMPT'"
+	body := mustMarshalToolResultBody(t, "")
+
+	var buf strings.Builder
+	(&Proxy{}).forwardCommand(&buf, tmpl, "simplifier", "oc_simplify", body, false)
+
+	if got := defaultOpencodeSessions.Get("simplifier"); got != "" {
+		t.Fatalf("expected session forgotten on empty output, still have %q", got)
+	}
+}
+
+func TestForwardCommandTurn1_IncludesBashTimeout(t *testing.T) {
+	tmpl := "opencode run --agent $AGENT --format default --dir /x '$PROMPT'"
+	body := `{"messages":[{"role":"user","content":"hello"}]}`
+
+	var buf strings.Builder
+	(&Proxy{}).forwardCommand(&buf, tmpl, "simplifier", "oc_simplify", []byte(body), false)
+
+	parts := strings.SplitN(buf.String(), "\r\n\r\n", 2)
+	if len(parts) != 2 {
+		t.Fatalf("malformed response")
+	}
+	var msg struct {
+		Content []struct {
+			Input struct {
+				Timeout int `json:"timeout"`
+			} `json:"input"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(parts[1]), &msg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(msg.Content) == 0 || msg.Content[0].Input.Timeout <= 0 {
+		t.Fatalf("expected positive timeout in Bash input, got %+v", msg.Content)
+	}
+}
+
+func TestForwardCommandTurn1_SSE_IncludesBashTimeout(t *testing.T) {
+	tmpl := "opencode run --agent $AGENT --format default --dir /x '$PROMPT'"
+	body := `{"messages":[{"role":"user","content":"hello"}]}`
+
+	var buf strings.Builder
+	(&Proxy{}).forwardCommand(&buf, tmpl, "simplifier", "oc_simplify", []byte(body), true)
+
+	if !strings.Contains(buf.String(), `\"timeout\":`) {
+		t.Fatalf("SSE tool_use missing timeout field: %q", buf.String())
+	}
+}
+
 func TestParseOpencodeOutput_StrayStderrLinesIgnored(t *testing.T) {
 	// opencode sometimes emits an ANSI warning line before JSON. Parser
 	// must keep going and still extract sessionID/text.
 	out := "\x1b[93m! \x1b[0m warning: blah\n" +
 		`{"type":"text","sessionID":"ses_ok","part":{"type":"text","text":"hi"}}`
-	sid, text := parseOpencodeOutput(out)
+	sid, text, _ := parseOpencodeOutput(out)
 	if sid != "ses_ok" || text != "hi" {
 		t.Errorf("got sid=%q text=%q", sid, text)
 	}
