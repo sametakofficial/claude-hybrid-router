@@ -144,7 +144,7 @@ func TestLocalRouteDetected(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=my_local_model --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:9999 --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hello"}},
 	})
 	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
@@ -162,13 +162,13 @@ func TestLocalRouteDetected(t *testing.T) {
 	if data["role"] != "assistant" {
 		t.Error("unexpected role")
 	}
-	if data["model"] != "my_local_model" {
-		t.Error("unexpected model")
+	if data["model"] != "http://127.0.0.1:9999" {
+		t.Errorf("unexpected model: %v", data["model"])
 	}
 	content := data["content"].([]interface{})[0].(map[string]interface{})
 	text := content["text"].(string)
-	if !strings.Contains(text, "my_local_model") {
-		t.Error("stub text missing model")
+	if !strings.Contains(text, "http://127.0.0.1:9999") {
+		t.Error("stub text missing model URL")
 	}
 	if !strings.Contains(text, "no local provider configured") {
 		t.Error("stub text missing message")
@@ -180,7 +180,7 @@ func TestLocalRouteStreaming(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=my_local_model --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:9999 --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hello"}},
 		"stream":   true,
 	})
@@ -190,8 +190,8 @@ func TestLocalRouteStreaming(t *testing.T) {
 	}
 
 	assertSSELifecycle(t, respBody)
-	if !strings.Contains(respBody, "my_local_model") {
-		t.Error("missing model in SSE")
+	if !strings.Contains(respBody, "http://127.0.0.1:9999") {
+		t.Error("missing model URL in SSE")
 	}
 	if !strings.Contains(respBody, "no local provider configured") {
 		t.Error("missing stub text in SSE")
@@ -203,7 +203,7 @@ func TestLocalRouteMarkerStripped(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=test_model --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:9999 --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hello"}},
 	})
 	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
@@ -221,7 +221,7 @@ func TestMarkerInMessagesNotRouted(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"messages": []map[string]string{{
 			"role":    "user",
-			"content": "<!-- @proxy-local-route:af83e9 url=my_local_model --> hello",
+			"content": "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:9999 --> hello",
 		}},
 	})
 	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
@@ -248,7 +248,7 @@ func TestAuthHeadersNotLogged(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=my_local_model --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:9999 --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hello"}},
 	})
 	status, _, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, map[string]string{

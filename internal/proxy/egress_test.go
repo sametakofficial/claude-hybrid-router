@@ -1,5 +1,5 @@
 // egress_test.go covers the local-route forwarding path:
-// Anthropic body → POST /v1/messages on the resolved route URL → Anthropic
+// Anthropic body → POST /v1/messages on the URL from the marker → Anthropic
 // response relayed back to the client. The proxy is a pure URL forwarder —
 // no model rewriting, no provider logic.
 package proxy
@@ -38,11 +38,9 @@ type anthropicBlock struct {
 	Input map[string]interface{} `json:"input,omitempty"`
 }
 
-func makeRouteResolver(t *testing.T, routeName, routeURL string) *config.RouteResolver {
+func makeRouteResolver(t *testing.T) *config.RouteResolver {
 	t.Helper()
-	r, err := config.NewRouteResolver(&config.RoutesConfig{
-		Routes: []config.RouteConfig{{Name: routeName, URL: routeURL}},
-	})
+	r, err := config.NewRouteResolver(&config.Config{})
 	if err != nil {
 		t.Fatalf("build resolver: %v", err)
 	}
@@ -56,12 +54,13 @@ func TestEgressNonStreaming(t *testing.T) {
 	}
 	t.Cleanup(func() { srv.Close() })
 
-	resolver := makeRouteResolver(t, "fast", fmt.Sprintf("http://127.0.0.1:%d", port))
+	resolver := makeRouteResolver(t)
 	infra := setupInfra(t, resolver)
 
+	marker := fmt.Sprintf("<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:%d -->", port)
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":      "claude-sonnet-4-20250514",
-		"system":     "<!-- @proxy-local-route:af83e9 url=fast --> You are helpful",
+		"system":     marker + " You are helpful",
 		"messages":   []map[string]string{{"role": "user", "content": "hello"}},
 		"max_tokens": 1024,
 	})
@@ -102,12 +101,13 @@ func TestEgressStreamingPassthrough(t *testing.T) {
 	}
 	t.Cleanup(func() { srv.Close() })
 
-	resolver := makeRouteResolver(t, "fast", fmt.Sprintf("http://127.0.0.1:%d", port))
+	resolver := makeRouteResolver(t)
 	infra := setupInfra(t, resolver)
 
+	marker := fmt.Sprintf("<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:%d -->", port)
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":      "claude-sonnet-4-20250514",
-		"system":     "<!-- @proxy-local-route:af83e9 url=fast --> ok",
+		"system":     marker + " ok",
 		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
 		"max_tokens": 1024,
 		"stream":     true,
@@ -127,13 +127,13 @@ func TestEgressStreamingPassthrough(t *testing.T) {
 	}
 }
 
-func TestEgressUnknownRoute(t *testing.T) {
-	resolver := makeRouteResolver(t, "known", "http://127.0.0.1:1")
+func TestEgressInvalidRouteURL(t *testing.T) {
+	resolver := makeRouteResolver(t)
 	infra := setupInfra(t, resolver)
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=unknown --> ok",
+		"system":   "<!-- @proxy-local-route:af83e9 url=not_a_url --> ok",
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 
@@ -148,19 +148,19 @@ func TestEgressUnknownRoute(t *testing.T) {
 	if errResp.Type != "error" {
 		t.Errorf("expected type error, got %s", errResp.Type)
 	}
-	if !strings.Contains(errResp.Error.Message, "unknown") {
-		t.Errorf("expected route name in error, got: %s", errResp.Error.Message)
+	if !strings.Contains(errResp.Error.Message, "Invalid route URL") {
+		t.Errorf("expected invalid URL error, got: %s", errResp.Error.Message)
 	}
 }
 
 func TestEgressUnreachable(t *testing.T) {
 	// Port 1 is reserved/unreachable.
-	resolver := makeRouteResolver(t, "dead_route", "http://127.0.0.1:1")
+	resolver := makeRouteResolver(t)
 	infra := setupInfra(t, resolver)
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=dead_route --> ok",
+		"system":   "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:1 --> ok",
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 
@@ -175,8 +175,8 @@ func TestEgressUnreachable(t *testing.T) {
 	if errResp.Type != "error" {
 		t.Errorf("expected error type, got %s", errResp.Type)
 	}
-	if !strings.Contains(errResp.Error.Message, "dead_route") {
-		t.Errorf("expected route name in message, got %s", errResp.Error.Message)
+	if !strings.Contains(errResp.Error.Message, "unreachable") {
+		t.Errorf("expected unreachable in message, got %s", errResp.Error.Message)
 	}
 }
 
@@ -184,7 +184,7 @@ func TestEgressNoResolverFallsBackToStub(t *testing.T) {
 	infra := setupInfra(t, nil)
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=my_route --> ok",
+		"system":   "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:9999 --> ok",
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
@@ -213,12 +213,13 @@ func TestEgressForwardsStructuredErrorBody(t *testing.T) {
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
 
-	resolver := makeRouteResolver(t, "m", fmt.Sprintf("http://127.0.0.1:%d", port))
+	resolver := makeRouteResolver(t)
 	infra := setupInfra(t, resolver)
 
+	marker := fmt.Sprintf("<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:%d -->", port)
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=m --> ok",
+		"system":   marker + " ok",
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
@@ -237,12 +238,13 @@ func TestEgressAgentHeader(t *testing.T) {
 	}
 	t.Cleanup(func() { srv.Close() })
 
-	resolver := makeRouteResolver(t, "agents", fmt.Sprintf("http://127.0.0.1:%d", port))
+	resolver := makeRouteResolver(t)
 	infra := setupInfra(t, resolver)
 
+	marker := fmt.Sprintf("<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:%d agent=simplifier -->", port)
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=agents agent=simplifier --> You are helpful",
+		"system":   marker + " You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hello"}},
 	})
 
@@ -268,12 +270,13 @@ func TestEgressBodyPassedAsIs(t *testing.T) {
 	}
 	t.Cleanup(func() { srv.Close() })
 
-	resolver := makeRouteResolver(t, "m", fmt.Sprintf("http://127.0.0.1:%d", port))
+	resolver := makeRouteResolver(t)
 	infra := setupInfra(t, resolver)
 
+	marker := fmt.Sprintf("<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:%d -->", port)
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":      "claude-sonnet-4-20250514",
-		"system":     "<!-- @proxy-local-route:af83e9 url=m --> ok",
+		"system":     marker + " ok",
 		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
 		"max_tokens": 16384,
 	})

@@ -9,13 +9,13 @@ import (
 
 func TestDetectLocalRoute_StringSystem(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
-		"system":   "<!-- @proxy-local-route:af83e9 url=my_model --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=http://localhost:3456 --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 
 	route, stripped := detectLocalRoute(body)
-	if route.Route != "my_model" {
-		t.Fatalf("expected my_model, got %q", route.Route)
+	if route.Route != "http://localhost:3456" {
+		t.Fatalf("expected http://localhost:3456, got %q", route.Route)
 	}
 	if route.Agent != "" {
 		t.Fatalf("expected empty agent, got %q", route.Agent)
@@ -32,14 +32,14 @@ func TestDetectLocalRoute_StringSystem(t *testing.T) {
 func TestDetectLocalRoute_ListSystem(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"system": []map[string]string{
-			{"type": "text", "text": "<!-- @proxy-local-route:af83e9 url=list_model --> Instructions"},
+			{"type": "text", "text": "<!-- @proxy-local-route:af83e9 url=http://localhost:4567 --> Instructions"},
 		},
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 
 	route, stripped := detectLocalRoute(body)
-	if route.Route != "list_model" {
-		t.Fatalf("expected list_model, got %q", route.Route)
+	if route.Route != "http://localhost:4567" {
+		t.Fatalf("expected http://localhost:4567, got %q", route.Route)
 	}
 
 	var data map[string]interface{}
@@ -59,7 +59,7 @@ func TestDetectLocalRoute_NoMarker(t *testing.T) {
 
 	route, stripped := detectLocalRoute(body)
 	if route.Route != "" {
-		t.Fatalf("expected no model, got %q", route.Route)
+		t.Fatalf("expected no route, got %q", route.Route)
 	}
 	if !bytes.Equal(stripped, body) {
 		t.Error("body should be unchanged")
@@ -70,7 +70,7 @@ func TestDetectLocalRoute_MarkerInMessages(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"messages": []map[string]string{{
 			"role":    "user",
-			"content": "<!-- @proxy-local-route:af83e9 url=my_model --> hello",
+			"content": "<!-- @proxy-local-route:af83e9 url=http://localhost:3456 --> hello",
 		}},
 	})
 
@@ -87,7 +87,7 @@ func TestDetectLocalRoute_NonJSON(t *testing.T) {
 	body := []byte("not json at all")
 	route, stripped := detectLocalRoute(body)
 	if route.Route != "" {
-		t.Fatalf("expected no model, got %q", route.Route)
+		t.Fatalf("expected no route, got %q", route.Route)
 	}
 	if !bytes.Equal(stripped, body) {
 		t.Error("body should be unchanged")
@@ -103,13 +103,13 @@ func TestDetectLocalRoute_EmptyBody(t *testing.T) {
 
 func TestDetectLocalRoute_WithAgent(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
-		"system":   "<!-- @proxy-local-route:af83e9 url=opencode agent=simplifier --> You are helpful",
+		"system":   "<!-- @proxy-local-route:af83e9 url=http://localhost:4567 agent=simplifier --> You are helpful",
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 
 	route, stripped := detectLocalRoute(body)
-	if route.Route != "opencode" {
-		t.Fatalf("expected model=opencode, got %q", route.Route)
+	if route.Route != "http://localhost:4567" {
+		t.Fatalf("expected url=http://localhost:4567, got %q", route.Route)
 	}
 	if route.Agent != "simplifier" {
 		t.Fatalf("expected agent=simplifier, got %q", route.Agent)
@@ -126,14 +126,14 @@ func TestDetectLocalRoute_WithAgent(t *testing.T) {
 func TestDetectLocalRoute_WithAgentListSystem(t *testing.T) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"system": []map[string]string{
-			{"type": "text", "text": "<!-- @proxy-local-route:af83e9 url=opencode agent=reviewer --> Instructions"},
+			{"type": "text", "text": "<!-- @proxy-local-route:af83e9 url=http://localhost:4567 agent=reviewer --> Instructions"},
 		},
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 
 	route, stripped := detectLocalRoute(body)
-	if route.Route != "opencode" {
-		t.Fatalf("expected model=opencode, got %q", route.Route)
+	if route.Route != "http://localhost:4567" {
+		t.Fatalf("expected url=http://localhost:4567, got %q", route.Route)
 	}
 	if route.Agent != "reviewer" {
 		t.Fatalf("expected agent=reviewer, got %q", route.Agent)
@@ -150,7 +150,7 @@ func TestDetectLocalRoute_WithAgentListSystem(t *testing.T) {
 
 func TestSendLocalStub_NonStreaming(t *testing.T) {
 	var buf bytes.Buffer
-	sendLocalStub(&buf, "test_model", false)
+	sendLocalStub(&buf, "http://localhost:3456", false)
 
 	output := buf.String()
 	if !strings.Contains(output, "HTTP/1.1 200 OK") {
@@ -172,11 +172,11 @@ func TestSendLocalStub_NonStreaming(t *testing.T) {
 	if resp["type"] != "message" {
 		t.Error("unexpected type")
 	}
-	if resp["model"] != "test_model" {
+	if resp["model"] != "http://localhost:3456" {
 		t.Error("unexpected model")
 	}
 	content := resp["content"].([]interface{})[0].(map[string]interface{})
-	if !strings.Contains(content["text"].(string), "test_model") {
+	if !strings.Contains(content["text"].(string), "http://localhost:3456") {
 		t.Error("stub text missing model name")
 	}
 	if !strings.Contains(content["text"].(string), "no local provider configured") {
@@ -186,7 +186,7 @@ func TestSendLocalStub_NonStreaming(t *testing.T) {
 
 func TestSendLocalStub_Streaming(t *testing.T) {
 	var buf bytes.Buffer
-	sendLocalStub(&buf, "test_model", true)
+	sendLocalStub(&buf, "http://localhost:3456", true)
 
 	output := buf.String()
 	if !strings.Contains(output, "text/event-stream") {
@@ -194,7 +194,7 @@ func TestSendLocalStub_Streaming(t *testing.T) {
 	}
 
 	assertSSELifecycle(t, output)
-	if !strings.Contains(output, "test_model") {
+	if !strings.Contains(output, "http://localhost:3456") {
 		t.Error("missing model in SSE output")
 	}
 	if !strings.Contains(output, "no local provider configured") {

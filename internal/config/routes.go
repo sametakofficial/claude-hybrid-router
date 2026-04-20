@@ -9,40 +9,33 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// RouteConfig maps a route name to a target URL.
-type RouteConfig struct {
-	Name string `yaml:"name"`
-	URL  string `yaml:"url"`
-}
-
-// RouteEgressConfig configures shared egress behavior.
-type RouteEgressConfig struct {
+// EgressConfig configures shared egress behavior.
+type EgressConfig struct {
 	Timeout          int    `yaml:"timeout,omitempty"`
 	SystemPromptFile string `yaml:"system_prompt_file,omitempty"`
 	ReminderFile     string `yaml:"reminder_file,omitempty"`
 }
 
-// RoutesConfig is the top-level config file structure.
-type RoutesConfig struct {
-	Egress RouteEgressConfig `yaml:"egress,omitempty"`
-	Routes []RouteConfig     `yaml:"routes"`
+// Config is the top-level config file structure.
+type Config struct {
+	Egress EgressConfig `yaml:"egress,omitempty"`
 }
 
-// RouteResolver resolves route names to target URLs.
+// RouteResolver holds egress configuration (system prompt, reminder, timeout).
+// Route resolution is no longer needed — the URL comes directly from the marker.
 type RouteResolver struct {
-	routes       map[string]string
 	systemPrompt string
 	reminder     string
 	timeout      time.Duration
 }
 
-// LoadRoutesConfig reads and parses a routes config file.
-func LoadRoutesConfig(path string) (*RoutesConfig, error) {
+// LoadConfig reads and parses the config file.
+func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var cfg RoutesConfig
+	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
@@ -50,21 +43,7 @@ func LoadRoutesConfig(path string) (*RoutesConfig, error) {
 }
 
 // NewRouteResolver builds a resolver from config.
-func NewRouteResolver(cfg *RoutesConfig) (*RouteResolver, error) {
-	routes := make(map[string]string, len(cfg.Routes))
-	for _, r := range cfg.Routes {
-		if r.Name == "" {
-			return nil, fmt.Errorf("route missing name")
-		}
-		if r.URL == "" {
-			return nil, fmt.Errorf("route %q missing url", r.Name)
-		}
-		if _, exists := routes[r.Name]; exists {
-			return nil, fmt.Errorf("duplicate route name %q", r.Name)
-		}
-		routes[r.Name] = strings.TrimRight(r.URL, "/")
-	}
-
+func NewRouteResolver(cfg *Config) (*RouteResolver, error) {
 	var systemPrompt string
 	if cfg.Egress.SystemPromptFile != "" {
 		path := cfg.Egress.SystemPromptFile
@@ -101,20 +80,10 @@ func NewRouteResolver(cfg *RoutesConfig) (*RouteResolver, error) {
 	}
 
 	return &RouteResolver{
-		routes:       routes,
 		systemPrompt: systemPrompt,
 		reminder:     reminder,
 		timeout:      timeout,
 	}, nil
-}
-
-// Resolve looks up a route name and returns its target URL.
-func (r *RouteResolver) Resolve(name string) (string, error) {
-	url, ok := r.routes[name]
-	if !ok {
-		return "", fmt.Errorf("unknown route %q", name)
-	}
-	return url, nil
 }
 
 // SystemPrompt returns the system prompt override text, or "" if not configured.

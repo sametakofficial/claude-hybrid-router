@@ -372,7 +372,15 @@ func writeResponseHeadersWithCL(w io.Writer, resp *http.Response, bodyLen int) {
 // The proxy is a pure URL forwarder: detect marker → strip marker → forward
 // body AS-IS to the resolved URL → relay response.
 func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte) {
-	routeName := route.Route
+	routeURL := strings.TrimRight(route.Route, "/")
+
+	if !strings.HasPrefix(routeURL, "http") {
+		log.Printf("invalid route URL: %s", routeURL)
+		errBody := formatError("invalid_request_error",
+			fmt.Sprintf("Invalid route URL %q in marker", routeURL))
+		sendAnthropicError(w, 400, errBody)
+		return
+	}
 
 	if p.routeResolver == nil {
 		// No config — fall back to stub response
@@ -383,19 +391,11 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte) {
 				isStreaming = s
 			}
 		}
-		sendLocalStub(w, routeName, isStreaming)
+		sendLocalStub(w, routeURL, isStreaming)
 		return
 	}
 
 	start := time.Now()
-	routeURL, err := p.routeResolver.Resolve(routeName)
-	if err != nil {
-		log.Printf("route resolution failed: %v", err)
-		errBody := formatError("invalid_request_error",
-			fmt.Sprintf("Unknown route %q — check ~/.claude-hybrid/config.yaml", routeName))
-		sendAnthropicError(w, 400, errBody)
-		return
-	}
 
 	isStreaming := false
 	var data map[string]interface{}
@@ -425,9 +425,9 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte) {
 		resp, err := p.localClient.Do(localReq)
 		if err != nil {
 			cat := classifyError(err)
-			log.Printf("[LOCAL_ERR:%s] egress unreachable for %s: %v (%s)", cat, routeName, err, endpoint)
+			log.Printf("[LOCAL_ERR:%s] egress unreachable for %s: %v (%s)", cat, routeURL, err, endpoint)
 			errBody := formatError("api_error",
-				fmt.Sprintf("[%s] Route '%s' unreachable: %v (%s)", cat, routeName, err, endpoint))
+				fmt.Sprintf("[%s] Route '%s' unreachable: %v (%s)", cat, routeURL, err, endpoint))
 			sendAnthropicError(w, 502, errBody)
 			return
 		}
@@ -437,7 +437,7 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte) {
 			resp.Body.Close()
 			delay := retryDelay(attempt)
 			log.Printf("[LOCAL_RETRY:%d/%d] route %s returned %d — retrying in %v",
-				attempt, maxAttempts, routeName, resp.StatusCode, delay)
+				attempt, maxAttempts, routeURL, resp.StatusCode, delay)
 			time.Sleep(delay)
 			continue
 		}
@@ -446,11 +446,11 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte) {
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			sanitized := sanitizeForLog(string(respBody))
-			log.Printf("[LOCAL_ERR:HTTP_%d] route %s returned %d: %s", resp.StatusCode, routeName, resp.StatusCode, sanitized)
+			log.Printf("[LOCAL_ERR:HTTP_%d] route %s returned %d: %s", resp.StatusCode, routeURL, resp.StatusCode, sanitized)
 			forwarded := respBody
 			if !isAnthropicError(respBody) {
 				forwarded = formatError("api_error",
-					fmt.Sprintf("[HTTP_%d] Route '%s' returned %d: %s", resp.StatusCode, routeName, resp.StatusCode, sanitized))
+					fmt.Sprintf("[HTTP_%d] Route '%s' returned %d: %s", resp.StatusCode, routeURL, resp.StatusCode, sanitized))
 			}
 			code := 502
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
@@ -463,7 +463,7 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte) {
 		if err := resp.Write(w); err != nil {
 			resp.Body.Close()
 			cat := classifyError(err)
-			log.Printf("[LOCAL_ERR:%s] response write for %s: %v", cat, routeName, err)
+			log.Printf("[LOCAL_ERR:%s] response write for %s: %v", cat, routeURL, err)
 			return
 		}
 		resp.Body.Close()
@@ -476,7 +476,7 @@ func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte) {
 		if attempt > 1 {
 			retryTag = fmt.Sprintf("retry %d, ", attempt-1)
 		}
-		log.Printf("LOCAL_OK %s (%s%s%dms)", routeName, retryTag, streamTag, time.Since(start).Milliseconds())
+		log.Printf("LOCAL_OK %s (%s%s%dms)", routeURL, retryTag, streamTag, time.Since(start).Milliseconds())
 		return
 	}
 }
