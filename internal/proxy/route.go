@@ -14,7 +14,7 @@ import (
 // The proxy is a pure URL forwarder — it extracts only the URL. Any service
 // behind that URL (e.g. opencode-bridge) is responsible for parsing its own
 // metadata (agent name, etc.) from the request body.
-var routeMarkerRE = regexp.MustCompile(`(?:<!--\s*)?@proxy-local-route:af83e9\s+url=(\S+?)(?:\s*-->)?(?:\s|$)`)
+var routeMarkerRE = regexp.MustCompile(`(?:<!--\s*)?@proxy-local-route:af83e9\s+url=(https?://\S+?)(?:\s*-->)?(?:\s|$)`)
 
 // RouteDirective holds the parsed fields from a routing marker.
 type RouteDirective struct {

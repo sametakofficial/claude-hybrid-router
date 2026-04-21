@@ -128,6 +128,10 @@ func TestEgressStreamingPassthrough(t *testing.T) {
 }
 
 func TestEgressInvalidRouteURL(t *testing.T) {
+	// Markers with non-URL values (no http:// prefix) should NOT match the
+	// route regex at all — the request goes upstream, not to a local route.
+	// This prevents backtick-wrapped examples in CLAUDE.md from being treated
+	// as real markers.
 	resolver := makeRouteResolver(t)
 	infra := setupInfra(t, resolver)
 
@@ -137,19 +141,11 @@ func TestEgressInvalidRouteURL(t *testing.T) {
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 
-	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
-	if status != 400 {
-		t.Fatalf("expected 400, got %d: %s", status, respBody)
-	}
-	var errResp aErrorResponse
-	if err := json.Unmarshal([]byte(respBody), &errResp); err != nil {
-		t.Fatalf("parse error response: %v\nbody: %s", err, respBody)
-	}
-	if errResp.Type != "error" {
-		t.Errorf("expected type error, got %s", errResp.Type)
-	}
-	if !strings.Contains(errResp.Error.Message, "Invalid route URL") {
-		t.Errorf("expected invalid URL error, got: %s", errResp.Error.Message)
+	status, _, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
+	// not_a_url does not match https?:// so the marker is ignored and the
+	// request is forwarded upstream (echo server returns 200).
+	if status != 200 {
+		t.Fatalf("expected 200 (upstream passthrough), got %d", status)
 	}
 }
 
