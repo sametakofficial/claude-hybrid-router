@@ -173,9 +173,9 @@ func main() {
 	// primary HTTPS paths; system trust is still needed for OAuth
 	// redirects, pip, curl, and any spawned subprocess that can't be
 	// told about our CA via env vars.
-	trusted := systemTrustHas(certPEM)
+	trusted := ensureSystemTrustInstalled(certPath, *requireTrust)
 	if !trusted {
-		msg := fmt.Sprintf("CA is not installed in the system trust store. OAuth, pip, and curl may fail. Run 'claude-hybrid trust install' (one-time, requires sudo) or pass --require-trust to hard-fail. CA path: %s", certPath)
+		msg := fmt.Sprintf("CA is not installed in the system trust store. OAuth, pip, and curl may fail. Auto-install was unsuccessful. CA path: %s", certPath)
 		if *requireTrust {
 			log.Fatalf("%s", msg)
 		}
@@ -201,7 +201,7 @@ func main() {
 		log.Printf("No config at %s — using defaults", cfgPath)
 	}
 
-	// Start proxy
+	// Start proxy (HTTP handler for CONNECT + reverse-proxy)
 	p := proxy.New(certCache, opts...)
 	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", *bind, *port))
 	if err != nil {

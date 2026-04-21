@@ -58,12 +58,13 @@ func New(cache *mitm.CertCache, opts ...Option) *Proxy {
 		o(p)
 	}
 	if p.httpClient == nil {
+		transport := &http.Transport{
+			ForceAttemptHTTP2:     true,
+			TLSClientConfig:       &tls.Config{},
+			ResponseHeaderTimeout: config.UpstreamTimeout,
+		}
 		p.httpClient = &http.Client{
-			Transport: &http.Transport{
-				ForceAttemptHTTP2:     true,
-				TLSClientConfig:       &tls.Config{},
-				ResponseHeaderTimeout: config.UpstreamTimeout,
-			},
+			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -87,10 +88,66 @@ func New(cache *mitm.CertCache, opts ...Option) *Proxy {
 	return p
 }
 
-// ServeHTTP handles CONNECT requests.
+// ListenTLSIntercept starts a TLS listener that accepts direct TLS connections
+// from Claude Code (redirected via iptables DNAT). Each connection gets a MITM
+// cert for the target host and is processed through the same handleTunnel
+// logic as CONNECT-tunneled connections.
+//
+// This exists because Claude Code 2.1+ is a compiled Bun binary whose fetch()
+// ignores HTTPS_PROXY, undici global dispatchers, and the proxy option in
+// fetchOptions. The only reliable interception method is iptables DNAT +
+// a raw TLS listener.
+func (p *Proxy) ListenTLSIntercept(ln net.Listener, targetHost string) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				log.Printf("TLS intercept accept error: %v", err)
+			}
+			return
+		}
+		go p.handleInterceptedConn(conn, targetHost)
+	}
+}
+
+func (p *Proxy) handleInterceptedConn(conn net.Conn, host string) {
+	defer conn.Close()
+
+	// Acquire semaphore
+	select {
+	case p.sem <- struct{}{}:
+	default:
+		return
+	}
+	defer func() { <-p.sem }()
+
+	// MITM TLS handshake — present a cert for the target host.
+	tlsCfg, err := p.certCache.GetTLSConfig(host)
+	if err != nil {
+		p.logVerbose("TLS intercept cert error for %s: %v", host, err)
+		return
+	}
+	tlsConn := tls.Server(conn, tlsCfg)
+	if err := tlsConn.Handshake(); err != nil {
+		p.logVerbose("TLS intercept handshake error for %s: %v", host, err)
+		return
+	}
+	defer tlsConn.Close()
+
+	p.handleTunnel(tlsConn, host, "443")
+}
+
+// ServeHTTP handles both CONNECT (MITM) and direct HTTP requests (reverse proxy).
+//
+// Reverse proxy mode: when Claude Code is launched with ANTHROPIC_BASE_URL
+// pointing at this proxy, it sends plain HTTP requests instead of CONNECT
+// tunnels. This path reads the body, checks for the routing marker, and
+// either forwards to the local provider or proxies upstream to Anthropic.
+// This is necessary because Bun's compiled fetch() ignores undici's global
+// proxy dispatcher, making CONNECT-based MITM proxying ineffective.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodConnect {
-		http.Error(w, "only CONNECT supported", http.StatusMethodNotAllowed)
+		p.handleReverseProxy(w, r)
 		return
 	}
 
@@ -264,6 +321,263 @@ func (p *Proxy) handleTunnel(tlsConn net.Conn, host, port string) {
 		if req.Close {
 			return
 		}
+	}
+}
+
+// handleReverseProxy processes direct HTTP requests from Claude Code when it is
+// configured with ANTHROPIC_BASE_URL pointing at this proxy. It reads the
+// request body, checks for the routing marker, and either forwards to the
+// local provider or proxies upstream to Anthropic's real API.
+func (p *Proxy) handleReverseProxy(w http.ResponseWriter, r *http.Request) {
+	log.Printf("REVERSE_PROXY %s %s%s (Host: %s, ContentLength: %d)",
+		r.Method, r.Host, r.URL.RequestURI(), r.Header.Get("Host"), r.ContentLength)
+
+	// Only POST is relevant for API calls; handle GET/OPTIONS for health checks.
+	if r.Method == "GET" && r.URL.Path == "/health" {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"status":"ok"}`))
+		return
+	}
+	if r.Method == "OPTIONS" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.WriteHeader(204)
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Acquire semaphore
+	select {
+	case p.sem <- struct{}{}:
+	default:
+		http.Error(w, "proxy overloaded", http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { <-p.sem }()
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, config.MaxBodyBytes+1))
+	r.Body.Close()
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if int64(len(body)) > config.MaxBodyBytes {
+		http.Error(w, "content too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	route, strippedBody := detectLocalRoute(body)
+	if route.Route == "" && p.verbose {
+		snippet := sanitizeForLog(string(body))
+		if len(snippet) > 2000 {
+			snippet = snippet[:2000]
+		}
+		log.Printf("NO_ROUTE_BODY %s", snippet)
+	}
+
+	// System prompt override
+	if route.Route != "" && p.routeResolver != nil && p.routeResolver.SystemPrompt() != "" {
+		strippedBody = rewriteSystemPrompt(strippedBody, p.routeResolver.SystemPrompt())
+	}
+
+	// Reminder injection
+	if route.Route != "" && p.routeResolver != nil && p.routeResolver.Reminder() != "" {
+		strippedBody = injectReminder(strippedBody, p.routeResolver.Reminder())
+	}
+
+	if route.Route != "" {
+		streamMode := "non-streaming"
+		var reqMeta struct {
+			Stream bool `json:"stream"`
+		}
+		if json.Unmarshal(body, &reqMeta) == nil && reqMeta.Stream {
+			streamMode = "streaming"
+		}
+		log.Printf("LOCAL_ROUTE %s %s%s → route=%s (%s) [reverse-proxy]",
+			r.Method, r.Host, r.URL.RequestURI(), route.Route, streamMode)
+
+		p.forwardLocalHTTP(w, route, strippedBody)
+	} else {
+		p.forwardUpstreamHTTP(w, r, body)
+	}
+}
+
+// forwardLocalHTTP sends the request to the local provider and writes the
+// response back through the http.ResponseWriter (reverse proxy mode).
+func (p *Proxy) forwardLocalHTTP(w http.ResponseWriter, route RouteDirective, body []byte) {
+	routeURL := strings.TrimRight(route.Route, "/")
+
+	if !strings.HasPrefix(routeURL, "http") {
+		log.Printf("invalid route URL: %s", routeURL)
+		http.Error(w, fmt.Sprintf("invalid route URL %q", routeURL), http.StatusBadRequest)
+		return
+	}
+
+	if p.routeResolver == nil {
+		isStreaming := false
+		var data map[string]interface{}
+		if json.Unmarshal(body, &data) == nil {
+			if s, ok := data["stream"].(bool); ok {
+				isStreaming = s
+			}
+		}
+		// Stub mode: respond through http.ResponseWriter
+		stubText := fmt.Sprintf("[Local model '%s' request intercepted by proxy — no local provider configured yet]", routeURL)
+		w.Header().Set("Content-Type", "application/json")
+		if isStreaming {
+			w.Header().Set("Content-Type", "text/event-stream")
+		}
+		w.WriteHeader(200)
+		if isStreaming {
+			writeSSEStubToWriter(w, "msg_stub_local_route", routeURL, stubText)
+		} else {
+			writeJSONStubToWriter(w, "msg_stub_local_route", routeURL, stubText)
+		}
+		return
+	}
+
+	start := time.Now()
+
+	isStreaming := false
+	var data map[string]interface{}
+	if json.Unmarshal(body, &data) == nil {
+		if s, ok := data["stream"].(bool); ok {
+			isStreaming = s
+		}
+	}
+
+	endpoint := routeURL + "/v1/messages"
+	maxAttempts := 1 + config.EgressMaxRetries
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		localReq, err := http.NewRequest("POST", endpoint, strings.NewReader(string(body)))
+		if err != nil {
+			log.Printf("failed to create egress request: %v", err)
+			http.Error(w, fmt.Sprintf("failed to create request: %v", err), http.StatusInternalServerError)
+			return
+		}
+		localReq.Header.Set("Content-Type", "application/json")
+		localReq.Header.Set("anthropic-version", "2023-06-01")
+
+		resp, err := p.localClient.Do(localReq)
+		if err != nil {
+			cat := classifyError(err)
+			log.Printf("[LOCAL_ERR:%s] egress unreachable for %s: %v (%s)", cat, routeURL, err, endpoint)
+			http.Error(w, fmt.Sprintf("[%s] Route '%s' unreachable: %v", cat, routeURL, err), http.StatusBadGateway)
+			return
+		}
+
+		if isRetryableStatus(resp.StatusCode) && attempt < maxAttempts {
+			io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			delay := retryDelay(attempt)
+			log.Printf("[LOCAL_RETRY:%d/%d] route %s returned %d — retrying in %v",
+				attempt, maxAttempts, routeURL, resp.StatusCode, delay)
+			time.Sleep(delay)
+			continue
+		}
+
+		// Copy response headers
+		for k, vals := range resp.Header {
+			for _, v := range vals {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+
+		if resp.StatusCode != 200 {
+			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			sanitized := sanitizeForLog(string(respBody))
+			log.Printf("[LOCAL_ERR:HTTP_%d] route %s returned %d: %s", resp.StatusCode, routeURL, resp.StatusCode, sanitized)
+			w.Write(respBody)
+			return
+		}
+
+		// Stream the response body
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			resp.Body.Close()
+			cat := classifyError(err)
+			log.Printf("[LOCAL_ERR:%s] response write for %s: %v", cat, routeURL, err)
+			return
+		}
+		resp.Body.Close()
+
+		streamTag := ""
+		if isStreaming {
+			streamTag = "streaming, "
+		}
+		retryTag := ""
+		if attempt > 1 {
+			retryTag = fmt.Sprintf("retry %d, ", attempt-1)
+		}
+		log.Printf("LOCAL_OK %s (%s%s%dms) [reverse-proxy]", routeURL, retryTag, streamTag, time.Since(start).Milliseconds())
+		return
+	}
+}
+
+// forwardUpstreamHTTP proxies a request to the real Anthropic API (reverse proxy mode).
+func (p *Proxy) forwardUpstreamHTTP(w http.ResponseWriter, r *http.Request, body []byte) {
+	// Build the upstream URL — target is always the real Anthropic API.
+	upstreamURL := "https://api.anthropic.com" + r.URL.RequestURI()
+
+	upReq, err := http.NewRequest(r.Method, upstreamURL, strings.NewReader(string(body)))
+	if err != nil {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		return
+	}
+
+	// Copy request headers, skip hop-by-hop
+	for k, vals := range r.Header {
+		if hopByHop[strings.ToLower(k)] {
+			continue
+		}
+		for _, v := range vals {
+			upReq.Header.Add(k, v)
+		}
+	}
+	if len(body) > 0 {
+		upReq.ContentLength = int64(len(body))
+	}
+
+	resp, err := p.httpClient.Do(upReq)
+	if err != nil {
+		log.Printf("upstream error for %s: %v", upstreamURL, err)
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for k, vals := range resp.Header {
+		if hopByHop[strings.ToLower(k)] {
+			continue
+		}
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// Stream response body — handles both SSE and regular responses.
+	if f, ok := w.(http.Flusher); ok {
+		buf := make([]byte, 32*1024)
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				w.Write(buf[:n])
+				f.Flush()
+			}
+			if readErr != nil {
+				break
+			}
+		}
+	} else {
+		io.Copy(w, resp.Body)
 	}
 }
 
@@ -655,7 +969,7 @@ func isAPIHost(host string) bool {
 		strings.Contains(host, "127.0.0.1")
 }
 
-var opencodeAgentRE = regexp.MustCompile(`<!--\s*@opencode-agent:[A-Za-z0-9_-]+\s*-->`)
+var opencodeAgentRE = regexp.MustCompile(`(?:<!--\s*)?@opencode-agent:[A-Za-z0-9_-]+(?:\s*-->)?`)
 var bearerRE = regexp.MustCompile(`(?i)bearer\s+\S+`)
 var apiKeyRE = regexp.MustCompile(`(?i)(sk-|key-)[a-zA-Z0-9]{8,}`)
 

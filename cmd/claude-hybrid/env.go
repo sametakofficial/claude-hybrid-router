@@ -30,14 +30,20 @@ var overrideVars = map[string]struct{}{
 	"DENO_CERT":                   {},
 	"GRPC_DEFAULT_SSL_ROOTS_FILE_PATH": {},
 	"CLAUDE_CODE_CERT_STORE":           {},
+	"ANTHROPIC_BASE_URL":               {},
 }
 
 // buildChildEnv constructs the environment for the Claude Code subprocess.
 // It inherits the parent environment, strips every variable we manage, and
-// then injects the proxy + CA configuration. We set both the Node-specific
-// knobs (NODE_EXTRA_CA_CERTS, NODE_USE_SYSTEM_CA) and a bundle path for
-// everything else so Python, curl, git, pip and the host OS keychain all
-// find the same trust anchor.
+// then injects the proxy + CA configuration.
+//
+// The primary routing mechanism is ANTHROPIC_BASE_URL, which points Claude
+// Code directly at the proxy's HTTP listener. This bypasses Bun's broken
+// HTTPS_PROXY support (Bun's compiled fetch() ignores undici's global proxy
+// dispatcher). The proxy handles routing in reverse-proxy mode.
+//
+// HTTPS_PROXY and related variables are still set for subprocesses (curl,
+// pip, git, etc.) that use the traditional CONNECT tunnel path.
 func buildChildEnv(proxyAddr, caCertPath, bundlePath string) []string {
 	env := make([]string, 0, len(os.Environ())+24)
 	for _, kv := range os.Environ() {
@@ -52,6 +58,9 @@ func buildChildEnv(proxyAddr, caCertPath, bundlePath string) []string {
 	}
 	httpProxy := "http://" + proxyAddr
 	env = append(env,
+		// Primary: direct Claude Code API calls to the proxy's reverse-proxy handler.
+		"ANTHROPIC_BASE_URL="+httpProxy,
+		// Secondary: CONNECT-based proxy for subprocesses (curl, pip, git, etc.)
 		"HTTPS_PROXY="+httpProxy,
 		"HTTP_PROXY="+httpProxy,
 		"https_proxy="+httpProxy,

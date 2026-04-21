@@ -14,7 +14,7 @@ import (
 // The proxy is a pure URL forwarder — it extracts only the URL. Any service
 // behind that URL (e.g. opencode-bridge) is responsible for parsing its own
 // metadata (agent name, etc.) from the request body.
-var routeMarkerRE = regexp.MustCompile(`<!--\s*@proxy-local-route:af83e9\s+url=(https?://\S+?)\s*-->`)
+var routeMarkerRE = regexp.MustCompile(`(?:<!--\s*)?@proxy-local-route:af83e9\s+url=(https?://\S+?)(?:\s*-->)?(?:\s|$)`)
 
 // RouteDirective holds the parsed fields from a routing marker.
 type RouteDirective struct {
@@ -187,4 +187,63 @@ func writeSSEStub(w io.Writer, msgID, model, stubText string) {
 
 	fmt.Fprintf(w, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: %d\r\n\r\n", len(sseBody))
 	w.Write(sseBody)
+}
+
+// writeJSONStubToWriter writes a stub JSON response through an io.Writer
+// (used by the reverse proxy path where we have an http.ResponseWriter).
+func writeJSONStubToWriter(w io.Writer, msgID, model, stubText string) {
+	resp := map[string]interface{}{
+		"id":            msgID,
+		"type":          "message",
+		"role":          "assistant",
+		"content":       []map[string]string{{"type": "text", "text": stubText}},
+		"model":         model,
+		"stop_reason":   "end_turn",
+		"stop_sequence": nil,
+		"usage":         map[string]int{"input_tokens": 0, "output_tokens": 1},
+	}
+	respBody, _ := json.Marshal(resp)
+	w.Write(respBody)
+}
+
+// writeSSEStubToWriter writes a stub SSE response through an io.Writer.
+func writeSSEStubToWriter(w io.Writer, msgID, model, stubText string) {
+	events := []struct {
+		event string
+		data  interface{}
+	}{
+		{"message_start", map[string]interface{}{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"id": msgID, "type": "message", "role": "assistant",
+				"content": []interface{}{}, "model": model,
+				"stop_reason": nil, "stop_sequence": nil,
+				"usage": map[string]int{"input_tokens": 0, "output_tokens": 0},
+			},
+		}},
+		{"content_block_start", map[string]interface{}{
+			"type": "content_block_start", "index": 0,
+			"content_block": map[string]string{"type": "text", "text": ""},
+		}},
+		{"content_block_delta", map[string]interface{}{
+			"type": "content_block_delta", "index": 0,
+			"delta": map[string]string{"type": "text_delta", "text": stubText},
+		}},
+		{"content_block_stop", map[string]interface{}{
+			"type": "content_block_stop", "index": 0,
+		}},
+		{"message_delta", map[string]interface{}{
+			"type":  "message_delta",
+			"delta": map[string]interface{}{"stop_reason": "end_turn", "stop_sequence": nil},
+			"usage": map[string]int{"output_tokens": 1},
+		}},
+		{"message_stop", map[string]interface{}{
+			"type": "message_stop",
+		}},
+	}
+
+	for _, ev := range events {
+		data, _ := json.Marshal(ev.data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.event, data)
+	}
 }

@@ -8,8 +8,6 @@ Local MITM routing proxy for Claude Code. Sits between Claude Code (subscription
 
 **Routing marker format:** `@proxy-local-route:af83e9 url=<endpoint>`
 
-<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:3456 -->
-
 Only the `system` field is checked for the marker — never `messages`. This prevents contamination if an agent quotes another agent's system prompt.
 
 ## Repository Structure
