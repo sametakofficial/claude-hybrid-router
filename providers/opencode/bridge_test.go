@@ -29,7 +29,7 @@ func TestDetectAgent_FromSystemBlocks(t *testing.T) {
 	req := anthropicRequest{
 		System: mustMarshal(t, []map[string]string{
 			{"type": "text", "text": "prefix"},
-			{"type": "text", "text": "@opencode-agent:reviewer here"},
+			{"type": "text", "text": "<!-- @opencode-agent:reviewer --> here"},
 		}),
 	}
 	if got := detectAgent(req); got != "reviewer" {

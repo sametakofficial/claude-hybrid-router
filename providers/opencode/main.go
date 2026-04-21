@@ -144,9 +144,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 // --- Agent-name detection ---
 
 // agentMarkerRE finds `<!-- @opencode-agent:NAME -->` anywhere in text.
-// Also accepts the bare form `@opencode-agent:NAME` to survive markdown
-// parsers that strip HTML comments.
-var agentMarkerRE = regexp.MustCompile(`@opencode-agent:([A-Za-z0-9_-]+)`)
+var agentMarkerRE = regexp.MustCompile(`<!--\s*@opencode-agent:([A-Za-z0-9_-]+)\s*-->`)
 
 // detectAgent scans the full request for an @opencode-agent:NAME marker.
 // Checks the system field first, then every message's content. Falls back

@@ -655,7 +655,7 @@ func isAPIHost(host string) bool {
 		strings.Contains(host, "127.0.0.1")
 }
 
-var opencodeAgentRE = regexp.MustCompile(`(?:<!--\s*)?@opencode-agent:[A-Za-z0-9_-]+(?:\s*-->)?`)
+var opencodeAgentRE = regexp.MustCompile(`<!--\s*@opencode-agent:[A-Za-z0-9_-]+\s*-->`)
 var bearerRE = regexp.MustCompile(`(?i)bearer\s+\S+`)
 var apiKeyRE = regexp.MustCompile(`(?i)(sk-|key-)[a-zA-Z0-9]{8,}`)
 
