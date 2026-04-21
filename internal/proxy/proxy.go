@@ -88,63 +88,12 @@ func New(cache *mitm.CertCache, opts ...Option) *Proxy {
 	return p
 }
 
-// ListenTLSIntercept starts a TLS listener that accepts direct TLS connections
-// from Claude Code (redirected via iptables DNAT). Each connection gets a MITM
-// cert for the target host and is processed through the same handleTunnel
-// logic as CONNECT-tunneled connections.
-//
-// This exists because Claude Code 2.1+ is a compiled Bun binary whose fetch()
-// ignores HTTPS_PROXY, undici global dispatchers, and the proxy option in
-// fetchOptions. The only reliable interception method is iptables DNAT +
-// a raw TLS listener.
-func (p *Proxy) ListenTLSIntercept(ln net.Listener, targetHost string) {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if !strings.Contains(err.Error(), "use of closed network connection") {
-				log.Printf("TLS intercept accept error: %v", err)
-			}
-			return
-		}
-		go p.handleInterceptedConn(conn, targetHost)
-	}
-}
-
-func (p *Proxy) handleInterceptedConn(conn net.Conn, host string) {
-	defer conn.Close()
-
-	// Acquire semaphore
-	select {
-	case p.sem <- struct{}{}:
-	default:
-		return
-	}
-	defer func() { <-p.sem }()
-
-	// MITM TLS handshake — present a cert for the target host.
-	tlsCfg, err := p.certCache.GetTLSConfig(host)
-	if err != nil {
-		p.logVerbose("TLS intercept cert error for %s: %v", host, err)
-		return
-	}
-	tlsConn := tls.Server(conn, tlsCfg)
-	if err := tlsConn.Handshake(); err != nil {
-		p.logVerbose("TLS intercept handshake error for %s: %v", host, err)
-		return
-	}
-	defer tlsConn.Close()
-
-	p.handleTunnel(tlsConn, host, "443")
-}
-
 // ServeHTTP handles both CONNECT (MITM) and direct HTTP requests (reverse proxy).
 //
 // Reverse proxy mode: when Claude Code is launched with ANTHROPIC_BASE_URL
 // pointing at this proxy, it sends plain HTTP requests instead of CONNECT
 // tunnels. This path reads the body, checks for the routing marker, and
 // either forwards to the local provider or proxies upstream to Anthropic.
-// This is necessary because Bun's compiled fetch() ignores undici's global
-// proxy dispatcher, making CONNECT-based MITM proxying ineffective.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodConnect {
 		p.handleReverseProxy(w, r)

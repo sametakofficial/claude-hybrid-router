@@ -173,10 +173,13 @@ func main() {
 	// primary HTTPS paths; system trust is still needed for OAuth
 	// redirects, pip, curl, and any spawned subprocess that can't be
 	// told about our CA via env vars.
-	trusted := ensureSystemTrustInstalled(certPath, *requireTrust)
+	trusted, trustErr := ensureSystemTrustInstalled(certPath)
 	if !trusted {
 		msg := fmt.Sprintf("CA is not installed in the system trust store. OAuth, pip, and curl may fail. Auto-install was unsuccessful. CA path: %s", certPath)
 		if *requireTrust {
+			if trustErr != nil {
+				log.Fatalf("%s: %v", msg, trustErr)
+			}
 			log.Fatalf("%s", msg)
 		}
 		log.Printf("warn: %s", msg)

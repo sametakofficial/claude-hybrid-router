@@ -87,6 +87,41 @@ func TestDetectLocalRoute_MarkerInMessages(t *testing.T) {
 	}
 }
 
+func TestDetectLocalRoute_MarkerInMessageTextBlocks(t *testing.T) {
+	body, _ := json.Marshal(map[string]interface{}{
+		"messages": []map[string]interface{}{{
+			"role": "user",
+			"content": []map[string]string{{
+				"type": "text",
+				"text": "<system-reminder>\n@proxy-local-route:af83e9 url=http://localhost:3456\n</system-reminder>",
+			}},
+		}},
+	})
+
+	route, stripped := detectLocalRoute(body)
+	if route.Route != "http://localhost:3456" {
+		t.Fatalf("expected route=http://localhost:3456, got %q", route.Route)
+	}
+	if bytes.Contains(stripped, []byte("@proxy-local-route")) {
+		t.Fatal("stripped body still contains marker")
+	}
+}
+
+func TestDetectLocalRoute_BareMarkerInSystem(t *testing.T) {
+	body, _ := json.Marshal(map[string]interface{}{
+		"system":   "@proxy-local-route:af83e9 url=http://localhost:3456 You are helpful",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+
+	route, stripped := detectLocalRoute(body)
+	if route.Route != "http://localhost:3456" {
+		t.Fatalf("expected http://localhost:3456, got %q", route.Route)
+	}
+	if bytes.Contains(stripped, []byte("@proxy-local-route")) {
+		t.Fatal("stripped body still contains marker")
+	}
+}
+
 func TestDetectLocalRoute_NonJSON(t *testing.T) {
 	body := []byte("not json at all")
 	route, stripped := detectLocalRoute(body)

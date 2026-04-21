@@ -2,17 +2,14 @@ package main
 
 import "log"
 
-func ensureSystemTrustInstalled(certPath string, require bool) bool {
+func ensureSystemTrustInstalled(certPath string) (bool, error) {
 	if systemTrustInstalledPlatform() {
-		return true
+		return true, nil
 	}
 	if err := installTrustPlatform(certPath); err != nil {
-		if require {
-			log.Fatalf("install trust: %v", err)
-		}
 		log.Printf("warn: auto trust install failed: %v", err)
-		return false
+		return false, err
 	}
 	log.Printf("system trust installed for %s", certPath)
-	return true
+	return true, nil
 }

@@ -41,9 +41,7 @@ at that URL.
 
 ## The routing marker
 
-Drop this one line into the `system` prompt of a Claude Code subagent
-(or into its `.md` file, since Claude Code packages agent markdown into
-the request body):
+Drop this one line into a Claude Code agent prompt or agent `.md` file:
 
 ```
 <!-- @proxy-local-route:af83e9 url=http://127.0.0.1:PORT -->
@@ -55,8 +53,8 @@ provider-specific hints like `<!-- @opencode-agent:simplifier -->` — to
 the given URL. Any agent without a marker keeps going to Anthropic,
 using your subscription as usual.
 
-Markers work in the top-level `system` field and in user messages
-(where Claude Code actually packages CLAUDE.md content, wrapped in
+Markers work in the top-level `system` field and in user message text
+blocks (where Claude Code packages CLAUDE.md and agent markdown inside
 `<system-reminder>` blocks).
 
 ## Project layout
@@ -108,15 +106,12 @@ subagent's `.md` file:
 
 ## How a request actually flows
 
-1. Claude Code calls `POST https://api.anthropic.com/v1/messages`. OS
-   routes it through `HTTPS_PROXY=127.0.0.1:<claudebridge-port>`.
-2. claudebridge answers CONNECT, hands back a MITM cert, speaks TLS.
-3. claudebridge reads the plaintext HTTP/1.1 request, peeks at the body,
-   regex-scans for `@proxy-local-route:af83e9 url=...`.
-4. **Marker found**: strip the marker, forward the body verbatim to the
+1. Claude Code is launched under `claude-hybrid`, which points API traffic at the local listener and also exports conventional proxy vars for subprocesses.
+2. claudebridge reads the request body and scans for `@proxy-local-route:af83e9 url=...` in `system` and reminder-wrapped message text blocks.
+3. **Marker found**: strip the marker, forward the body verbatim to the
    URL with `Content-Type: application/json`. Relay the response bytes
    (including SSE) back to Claude Code. Log `LOCAL_ROUTE` and `LOCAL_OK`.
-5. **No marker**: forward to `api.anthropic.com` over HTTP/2, relay the
+4. **No marker**: forward to `api.anthropic.com` over HTTP/2, relay the
    response. Claude Code's subscription auth header is already on the
    request, so Anthropic treats it like a normal call.
 
@@ -147,10 +142,12 @@ go build -o opencode-bridge ./providers/opencode   # optional provider
 
 On Windows, the output is `claude-hybrid.exe` automatically.
 
-### First run (one-time trust setup)
+### First run (trust bootstrap)
 
-The proxy generates a local CA certificate on first launch. You must
-install it into your OS trust store **once** so TLS validation works:
+The proxy generates a local CA certificate on first launch and attempts
+to install it into your OS trust store automatically. If that succeeds,
+you're done. If it fails, `claude-hybrid` prints the CA path and you can
+run the trust subcommand manually:
 
 <details>
 <summary><b>Linux</b></summary>
@@ -214,6 +211,40 @@ egress:
 
 Both files are optional. Without them the proxy is pure pass-through.
 
+## Agent contract
+
+Claude Code only auto-loads custom agents that are valid Claude agent
+files. In practice that means your `~/.claude/agents/*.md` files must
+use YAML frontmatter.
+
+Minimal example:
+
+```markdown
+---
+name: simplifier
+description: Routes this subagent through a custom base URL.
+model: inherit
+---
+<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:3456 -->
+
+You are the simplifier agent.
+```
+
+Quick checks:
+
+```bash
+claude agents
+./claude-hybrid -p "selam adın ne"
+./claude-hybrid --agent simplifier -p "adın ne"
+```
+
+Expected result for the sample routing setup used in this repo:
+
+```text
+Selam, adım osuruk.
+Adım osuruk.
+```
+
 ## Logs
 
 | File | What's in it |
@@ -244,9 +275,9 @@ TTL + disk persistence, agent-name detection, prompt extraction.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | CA not in system trust store | Run `claude-hybrid trust install` |
+| `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | CA not in system trust store | Let first-run auto-install finish or run `claude-hybrid trust install` |
 | `SELF_SIGNED_CERT_IN_CHAIN` | Stale CA from older version | Delete `~/.claude-hybrid/certs/` and restart (auto-regenerates) |
-| Proxy starts but Claude ignores it | `HTTPS_PROXY` not set | Let `claude-hybrid` launch Claude (it sets env vars automatically) |
+| Proxy starts but Claude ignores routing | Agent file not registered by Claude | Check `claude agents`; make sure the agent `.md` has YAML frontmatter |
 | OAuth / GitHub login fails | OAuth host not bypassed | Should be fixed in latest; check `claude-hybrid --verbose` logs |
 | Windows: `claude` opens Desktop GUI | PATH shadowing | Ensure npm-installed `claude` CLI is earlier in PATH than the Desktop app |
 | `trust install` fails on macOS | No admin password | Run with `sudo` or ask IT to add the cert |

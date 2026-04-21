@@ -37,13 +37,12 @@ var overrideVars = map[string]struct{}{
 // It inherits the parent environment, strips every variable we manage, and
 // then injects the proxy + CA configuration.
 //
-// The primary routing mechanism is ANTHROPIC_BASE_URL, which points Claude
-// Code directly at the proxy's HTTP listener. This bypasses Bun's broken
-// HTTPS_PROXY support (Bun's compiled fetch() ignores undici's global proxy
-// dispatcher). The proxy handles routing in reverse-proxy mode.
+// Claude Code reaches the local listener through ANTHROPIC_BASE_URL. The
+// proxy then decides whether to forward upstream to Anthropic unchanged or
+// reroute the request to a marker-selected base URL.
 //
-// HTTPS_PROXY and related variables are still set for subprocesses (curl,
-// pip, git, etc.) that use the traditional CONNECT tunnel path.
+// HTTPS_PROXY and related variables remain set for subprocesses (curl, pip,
+// git, etc.) that still use conventional proxy semantics.
 func buildChildEnv(proxyAddr, caCertPath, bundlePath string) []string {
 	env := make([]string, 0, len(os.Environ())+24)
 	for _, kv := range os.Environ() {

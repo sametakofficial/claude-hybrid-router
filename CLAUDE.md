@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Local MITM routing proxy for Claude Code. Sits between Claude Code (subscription) and Anthropic's API, intercepts HTTPS traffic via CONNECT + MITM TLS, detects a routing marker in the `system` field of Claude API requests, and either routes to a local/alternative model via OpenAI-compatible API or forwards unmodified to Anthropic.
+Local Claude Code routing proxy. It preserves Anthropic subscription traffic while inspecting Claude requests for a routing marker and forwarding marked requests to alternate base URLs. In practice Claude Code can reach the proxy through CONNECT+MITM and through direct API requests routed to the local listener.
 
 **Routing marker format:** `@proxy-local-route:af83e9 url=<endpoint>`
 
-Only the `system` field is checked for the marker — never `messages`. This prevents contamination if an agent quotes another agent's system prompt.
+The proxy checks both the top-level `system` field and Claude Code's `<system-reminder>` blocks that land in `messages[].content[].text`.
 
 ## Repository Structure
 
@@ -86,15 +86,16 @@ go run ./cmd/integration-test -proxy HOST:PORT [-stream]
 ## Architecture
 
 ```
-Claude Code  --CONNECT-->  Proxy (localhost:random)
-                              ├─ TLS handshake with client (MITM cert from CertCache)
-                              ├─ http.ReadRequest() reads plaintext HTTP
-                              ├─ Parse JSON body, check system field for routing marker
-                              ├─ If marker found + url=BASE_URL:
-                              │   ├─ Forward request unmodified to BASE_URL
-                              │   └─ Relay response back to Claude Code
-                              ├─ If marker found, no config → return stub response
-                              └─ If no marker → HTTP/2 to upstream via net/http, relay as HTTP/1.1
+Claude Code  ──►  Proxy (localhost:random)
+                     ├─ CONNECT path: terminate TLS with generated MITM cert
+                     ├─ Direct HTTP path: accept API requests routed to local listener
+                     ├─ Read JSON body and detect `@proxy-local-route`
+                     ├─ If marker found + url=BASE_URL:
+                     │   ├─ Strip marker from request body
+                     │   ├─ Optionally rewrite system prompt / inject reminder
+                     │   └─ Forward to BASE_URL and relay response
+                     └─ If no marker:
+                         └─ Forward upstream to Anthropic unchanged
 ```
 
 ## Key Files
@@ -110,7 +111,7 @@ Claude Code  --CONNECT-->  Proxy (localhost:random)
 | `cmd/claude-hybrid/trust.go` | `claude-hybrid trust install\|status` subcommand dispatcher |
 | `cmd/claude-hybrid/versioning.go` | Build-time version embedding (`-ldflags`) and `--version` output |
 | `internal/proxy/proxy.go` | Core proxy: CONNECT handler, MITM TLS, keep-alive tunnel loop, upstream forwarding, local model forwarding |
-| `internal/proxy/route.go` | Route marker detection in system field + Anthropic stub response (JSON and SSE) |
+| `internal/proxy/route.go` | Route marker detection in `system` and `messages[].content[].text` + Anthropic stub response (JSON and SSE) |
 | `internal/proxy/errors.go` | Anthropic-format error response builders for local provider failures |
 | `internal/config/config.go` | Constants: timeouts, body size limits, concurrency cap |
 | `internal/config/routes.go` | YAML config parsing (`~/.claude-hybrid/config.yaml`), route and provider resolution |
@@ -120,7 +121,7 @@ Claude Code  --CONNECT-->  Proxy (localhost:random)
 
 ## Testing
 
-Tests run in-process — no external services needed. Certificates are generated programmatically in memory. The proxy, echo server, and mock OpenAI server start in goroutines. Tests exercise: clean request forwarding, GET requests, keep-alive (multiple requests per tunnel), local route detection (non-streaming and streaming), marker stripping, marker-in-messages passthrough, auth header sanitization in logs, request/response translation, streaming translation, tool use round-trips, error handling, and local provider error propagation (truncated responses, garbled SSE streams).
+Tests run in-process — no external services needed. Certificates are generated programmatically in memory. The proxy, echo server, and mock OpenAI server start in goroutines. Tests exercise: clean request forwarding, GET requests, keep-alive (multiple requests per tunnel), local route detection (non-streaming and streaming), marker stripping from `system` and message reminder blocks, auth header sanitization in logs, request/response translation, streaming translation, tool use round-trips, error handling, and local provider error propagation (truncated responses, garbled SSE streams).
 
 ## Development Notes
 
