@@ -528,12 +528,41 @@ func injectReminder(body []byte, reminder string) []byte {
 }
 
 // rewriteSystemPrompt replaces the system field in the request body.
+// It preserves any @opencode-agent:NAME markers from the original system
+// field by appending them to the new system prompt.
 func rewriteSystemPrompt(body []byte, newSystem string) []byte {
 	var data map[string]interface{}
 	if json.Unmarshal(body, &data) != nil {
 		return body
 	}
-	data["system"] = newSystem
+
+	// Preserve @opencode-agent markers from the original system field.
+	var preservedMarkers []string
+	if sys, ok := data["system"]; ok {
+		switch s := sys.(type) {
+		case string:
+			if matches := opencodeAgentRE.FindAllString(s, -1); len(matches) > 0 {
+				preservedMarkers = matches
+			}
+		case []interface{}:
+			for _, block := range s {
+				if bm, ok := block.(map[string]interface{}); ok {
+					if text, ok := bm["text"].(string); ok {
+						if matches := opencodeAgentRE.FindAllString(text, -1); len(matches) > 0 {
+							preservedMarkers = append(preservedMarkers, matches...)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	finalSystem := newSystem
+	if len(preservedMarkers) > 0 {
+		finalSystem = newSystem + "\n" + strings.Join(preservedMarkers, "\n")
+	}
+
+	data["system"] = finalSystem
 	out, err := json.Marshal(data)
 	if err != nil {
 		return body
@@ -602,6 +631,7 @@ func isAPIHost(host string) bool {
 		strings.Contains(host, "127.0.0.1")
 }
 
+var opencodeAgentRE = regexp.MustCompile(`(?:<!--\s*)?@opencode-agent:[A-Za-z0-9_-]+(?:\s*-->)?`)
 var bearerRE = regexp.MustCompile(`(?i)bearer\s+\S+`)
 var apiKeyRE = regexp.MustCompile(`(?i)(sk-|key-)[a-zA-Z0-9]{8,}`)
 

@@ -105,6 +105,102 @@ func TestDetectLocalRoute_EmptyBody(t *testing.T) {
 	}
 }
 
+func TestRewriteSystemPrompt_PreservesOpencodeAgentMarker(t *testing.T) {
+	// Simulate the flow: system has both route marker and agent marker.
+	// After detectLocalRoute strips the route marker, the agent marker remains.
+	// Then rewriteSystemPrompt replaces the system but must preserve the agent marker.
+	body, _ := json.Marshal(map[string]interface{}{
+		"system":   "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:4568 -->\n<!-- @opencode-agent:simplifier -->",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+
+	route, stripped := detectLocalRoute(body)
+	if route.Route != "http://127.0.0.1:4568" {
+		t.Fatalf("expected route http://127.0.0.1:4568, got %q", route.Route)
+	}
+
+	// After stripping, the agent marker should still be in the system field.
+	var preRewrite map[string]interface{}
+	json.Unmarshal(stripped, &preRewrite)
+	sys := preRewrite["system"].(string)
+	if !strings.Contains(sys, "@opencode-agent:simplifier") {
+		t.Fatalf("agent marker lost after detectLocalRoute, system=%q", sys)
+	}
+
+	// Now rewrite the system prompt — the agent marker must survive.
+	newPrompt := "You are a helpful assistant."
+	result := rewriteSystemPrompt(stripped, newPrompt)
+
+	var postRewrite map[string]interface{}
+	json.Unmarshal(result, &postRewrite)
+	finalSys := postRewrite["system"].(string)
+	if !strings.Contains(finalSys, newPrompt) {
+		t.Errorf("new system prompt missing, got %q", finalSys)
+	}
+	if !strings.Contains(finalSys, "@opencode-agent:simplifier") {
+		t.Errorf("agent marker destroyed by rewriteSystemPrompt, got %q", finalSys)
+	}
+}
+
+func TestRewriteSystemPrompt_PreservesMultipleMarkers(t *testing.T) {
+	body, _ := json.Marshal(map[string]interface{}{
+		"system":   "<!-- @opencode-agent:simplifier -->\n<!-- @opencode-agent:reviewer -->",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+
+	result := rewriteSystemPrompt(body, "New system prompt.")
+
+	var data map[string]interface{}
+	json.Unmarshal(result, &data)
+	sys := data["system"].(string)
+	if !strings.Contains(sys, "@opencode-agent:simplifier") {
+		t.Errorf("first marker lost, got %q", sys)
+	}
+	if !strings.Contains(sys, "@opencode-agent:reviewer") {
+		t.Errorf("second marker lost, got %q", sys)
+	}
+	if !strings.Contains(sys, "New system prompt.") {
+		t.Errorf("new prompt missing, got %q", sys)
+	}
+}
+
+func TestRewriteSystemPrompt_NoMarker(t *testing.T) {
+	body, _ := json.Marshal(map[string]interface{}{
+		"system":   "Just a regular system prompt.",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+
+	result := rewriteSystemPrompt(body, "Replaced prompt.")
+
+	var data map[string]interface{}
+	json.Unmarshal(result, &data)
+	sys := data["system"].(string)
+	if sys != "Replaced prompt." {
+		t.Errorf("expected exact replacement, got %q", sys)
+	}
+}
+
+func TestRewriteSystemPrompt_ListSystemPreservesMarker(t *testing.T) {
+	body, _ := json.Marshal(map[string]interface{}{
+		"system": []map[string]string{
+			{"type": "text", "text": "<!-- @opencode-agent:architect --> Some instructions"},
+		},
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+
+	result := rewriteSystemPrompt(body, "New prompt.")
+
+	var data map[string]interface{}
+	json.Unmarshal(result, &data)
+	sys := data["system"].(string)
+	if !strings.Contains(sys, "@opencode-agent:architect") {
+		t.Errorf("marker from list system lost, got %q", sys)
+	}
+	if !strings.Contains(sys, "New prompt.") {
+		t.Errorf("new prompt missing, got %q", sys)
+	}
+}
+
 func TestSendLocalStub_NonStreaming(t *testing.T) {
 	var buf bytes.Buffer
 	sendLocalStub(&buf, "http://localhost:3456", false)
