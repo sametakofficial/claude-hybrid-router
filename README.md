@@ -131,18 +131,68 @@ Those are provider concerns.
 
 ## Install & run
 
+### Requirements
+
+- Go 1.24+ (build only — the output is a static binary with zero runtime deps)
+- `claude` CLI installed and on PATH ([install guide](https://docs.anthropic.com/en/docs/claude-code))
+
+### Build
+
 ```bash
-# from a clone of the repo
-go build -o claude-hybrid    ./cmd/claude-hybrid
-go build -o opencode-bridge  ./providers/opencode
+git clone https://github.com/peter-wagstaff/claude-hybrid-router.git
+cd claude-hybrid-router
+go build -o claude-hybrid   ./cmd/claude-hybrid
+go build -o opencode-bridge ./providers/opencode   # optional provider
+```
 
-# one-time: trust the local CA so MITM certs validate
-./claude-hybrid trust install
+On Windows, the output is `claude-hybrid.exe` automatically.
 
-# run Claude Code through the proxy
-./claude-hybrid               # launches `claude` under the proxy
-./claude-hybrid --proxy-only  # proxy only, no claude launch (for testing)
-./claude-hybrid --verbose     # dump every request routing decision
+### First run (one-time trust setup)
+
+The proxy generates a local CA certificate on first launch. You must
+install it into your OS trust store **once** so TLS validation works:
+
+<details>
+<summary><b>Linux</b></summary>
+
+```bash
+./claude-hybrid trust install   # uses sudo + update-ca-certificates or trust anchor
+./claude-hybrid trust status    # verify: should print "System trust: true"
+```
+
+Supports Debian/Ubuntu, Fedora/RHEL, Arch, Alpine.
+</details>
+
+<details>
+<summary><b>macOS</b></summary>
+
+```bash
+./claude-hybrid trust install   # uses sudo + security add-trusted-cert → System Keychain
+./claude-hybrid trust status    # verify
+```
+
+Requires admin password once. Works on both Intel and Apple Silicon.
+</details>
+
+<details>
+<summary><b>Windows</b></summary>
+
+```powershell
+.\claude-hybrid.exe trust install   # uses certutil → current user ROOT store (no admin needed)
+.\claude-hybrid.exe trust status    # verify
+```
+
+No UAC elevation required — installs to the per-user certificate store.
+</details>
+
+### Run
+
+```bash
+claude-hybrid                       # launches `claude` under the proxy
+claude-hybrid --proxy-only          # proxy only, no claude launch (for testing)
+claude-hybrid --verbose             # log every request routing decision
+claude-hybrid --require-trust       # abort if CA is not in system trust store
+claude-hybrid -- --model opus       # pass flags to claude after --
 ```
 
 The launcher also accepts a shell-script wrapper that manages the
@@ -189,6 +239,40 @@ in memory. Covers: CONNECT handling, MITM TLS, marker detection in
 system + messages, marker stripping, auth-header sanitization, retry
 backoff, SSE relay, provider two-turn tool-use protocol, session cache
 TTL + disk persistence, agent-name detection, prompt extraction.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | CA not in system trust store | Run `claude-hybrid trust install` |
+| `SELF_SIGNED_CERT_IN_CHAIN` | Stale CA from older version | Delete `~/.claude-hybrid/certs/` and restart (auto-regenerates) |
+| Proxy starts but Claude ignores it | `HTTPS_PROXY` not set | Let `claude-hybrid` launch Claude (it sets env vars automatically) |
+| OAuth / GitHub login fails | OAuth host not bypassed | Should be fixed in latest; check `claude-hybrid --verbose` logs |
+| Windows: `claude` opens Desktop GUI | PATH shadowing | Ensure npm-installed `claude` CLI is earlier in PATH than the Desktop app |
+| `trust install` fails on macOS | No admin password | Run with `sudo` or ask IT to add the cert |
+| Local provider unreachable | Provider not running | Start musistudio (`docker compose -f deploy/docker-compose.yaml up -d`) or opencode-bridge |
+
+### Checking trust status
+
+```bash
+claude-hybrid trust status
+# CA path: /home/you/.claude-hybrid/certs/ca.crt
+# System trust: true
+```
+
+If `System trust: false`, run `claude-hybrid trust install` again.
+
+### Environment variables set by the launcher
+
+The launcher sets these on the Claude child process automatically:
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `HTTPS_PROXY` / `HTTP_PROXY` | `http://127.0.0.1:<port>` | Route traffic through proxy |
+| `NODE_EXTRA_CA_CERTS` | `~/.claude-hybrid/certs/ca.crt` | Node.js CA trust (legacy) |
+| `NODE_USE_SYSTEM_CA` | `1` | Node.js reads OS trust store |
+| `CLAUDE_CODE_CERT_STORE` | `system,bundled` | Claude Code reads OS trust store first |
+| `SSL_CERT_FILE` | `~/.claude-hybrid/certs/bundle.crt` | Python/curl/git CA bundle |
 
 ## License
 

@@ -148,9 +148,33 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.handleTunnel(tlsConn, host, port)
 }
 
+var bypassHosts = map[string]bool{
+	"pypi.org": true, "files.pythonhosted.org": true,
+	"registry.npmjs.org":    true,
+	"accounts.google.com":   true,
+	"oauth2.googleapis.com": true,
+	"github.com":            true,
+	"api.github.com":        true,
+	"rubygems.org":          true,
+	"crates.io":             true,
+	"static.crates.io":      true,
+	"proxy.golang.org":      true,
+	"sum.golang.org":        true,
+}
+
+var bypassSuffixes = []string{".pythonhosted.org", ".npmjs.org"}
+
 func shouldBypassMITM(host string) bool {
 	host = strings.ToLower(host)
-	return host == "pypi.org" || host == "files.pythonhosted.org" || strings.HasSuffix(host, ".pythonhosted.org")
+	if bypassHosts[host] {
+		return true
+	}
+	for _, suffix := range bypassSuffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Proxy) tunnelDirect(client net.Conn, target string) error {

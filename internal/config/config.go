@@ -13,6 +13,6 @@ const (
 	MitmCertValidityHours = 72.0
 
 	EgressMaxRetries   = 2             // additional attempts after first failure
-	EgressRetryBaseMs  = 1000          // first retry delay in ms (doubles each retry)
+	EgressRetryBaseMs  = 300           // first retry delay in ms (doubles each retry)
 	EgressRetryJitter  = 500           // random jitter added to delay in ms
 )

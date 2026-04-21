@@ -16,37 +16,48 @@ Only the `system` field is checked for the marker — never `messages`. This pre
 
 ```
 ├── go.mod
-├── cmd/claude-hybrid/main.go        # Launcher: cert gen, config load, start proxy, exec claude
+├── cmd/
+│   ├── claude-hybrid/
+│   │   ├── main.go              # Launcher: cert gen, config load, start proxy, exec claude
+│   │   ├── bundle.go            # Combined CA bundle creation (system roots + MITM CA)
+│   │   ├── claude_unix.go       # Unix: resolveClaudeBinary() returns "claude"
+│   │   ├── claude_windows.go    # Windows PATH resolution (Desktop app shadowing fix)
+│   │   ├── env.go               # Child process environment variable management
+│   │   ├── log_unix.go          # Unix log file truncation with flock
+│   │   ├── log_windows.go       # Windows log file truncation (exclusive open)
+│   │   ├── selfcheck.go         # Startup self-check: CA cert generation + validation
+│   │   ├── trust.go             # `claude-hybrid trust` subcommand (install/status)
+│   │   ├── trust_darwin.go      # macOS Keychain CA trust integration
+│   │   ├── trust_linux.go       # Linux CA trust store integration
+│   │   ├── trust_unix.go        # Shared Unix trust helpers
+│   │   ├── trust_windows.go     # Windows certificate store trust integration
+│   │   └── versioning.go        # Build version embedding and display
+│   └── integration-test/
+│       └── main.go              # Integration test runner against real providers
 ├── internal/
 │   ├── config/
-│   │   ├── config.go                # Env-overridable constants (timeouts, limits)
-│   │   └── providers.go             # YAML config parsing, model label → provider resolution
-│   ├── mitm/mitm.go                 # CA generation, per-domain cert gen, LRU cache
+│   │   ├── config.go            # Env-overridable constants (timeouts, limits)
+│   │   └── routes.go            # YAML config parsing, route/provider resolution
+│   ├── mitm/
+│   │   ├── mitm.go              # CA generation, per-domain cert gen, LRU cache
+│   │   └── mitm_test.go         # MITM cert generation tests
 │   ├── proxy/
-│   │   ├── proxy.go                 # CONNECT handler, MITM TLS, tunnel loop, upstream/local forwarding
-│   │   └── route.go                 # Route marker detection + stub response generation
-│   ├── testutil/
-│   │   ├── certs.go                 # Test cert generation helpers
-│   │   ├── echo.go                  # Mock HTTPS echo server
-│   │   └── openai.go               # Mock OpenAI chat completions server
-│   └── translate/
-│       ├── transformer.go           # Transformer interface, TransformChain, TransformContext
-│       ├── transform_registry.go    # Transform name → constructor registry, BuildChain
-│       ├── transform.go             # Schema cleaning (SchemaTransformer, fieldStripper, geminiTransformer)
-│       ├── transform_reasoning.go   # reasoning_content → thinking blocks
-│       ├── transform_enhancetool.go # Repair malformed tool call JSON
-│       ├── transform_cleancache.go  # Strip cache_control from messages
-│       ├── transform_customparams.go # Inject custom params from config
-│       ├── transform_deepseek.go    # max_completion_tokens → max_tokens rename
-│       ├── transform_thinktag.go    # <think> tag extraction FSM
-│       ├── transform_openrouter.go  # OpenRouter quirks (tool IDs, cache_control, reasoning field)
-│       ├── transform_groq.go        # Groq quirks (cache_control, $schema, tool IDs)
-│       ├── transform_tooluse.go     # ExitTool injection/interception
-│       ├── transform_forcereasoning.go # Inject reasoning prompt, extract tags
-│       ├── jsonfix.go               # Relaxed JSON parser for tool argument repair
-│       ├── request.go               # Anthropic → OpenAI request translation
-│       ├── response.go              # OpenAI → Anthropic response translation
-│       └── stream.go                # OpenAI SSE → Anthropic SSE streaming
+│   │   ├── proxy.go             # CONNECT handler, MITM TLS, tunnel loop, upstream/local forwarding
+│   │   ├── route.go             # Route marker detection + stub response generation
+│   │   ├── errors.go            # Anthropic-format error response builders
+│   │   ├── proxy_test.go        # Core proxy integration tests
+│   │   ├── route_test.go        # Route marker detection tests
+│   │   ├── egress_test.go       # Egress forwarding tests
+│   │   └── testhelpers_test.go  # Shared test fixtures
+│   └── testutil/
+│       ├── certs.go             # Test cert generation helpers
+│       ├── echo.go              # Mock HTTPS echo server
+│       └── musistudio.go        # Mock Musistudio/claude-code-router server
+└── providers/
+    └── opencode/
+        ├── main.go              # opencode-bridge: Anthropic-API server delegating to opencode CLI
+        ├── cache.go             # Per-agent session ID cache
+        └── bridge_test.go       # Bridge unit tests
 ```
 
 ## Commands
@@ -81,13 +92,9 @@ Claude Code  --CONNECT-->  Proxy (localhost:random)
                               ├─ TLS handshake with client (MITM cert from CertCache)
                               ├─ http.ReadRequest() reads plaintext HTTP
                               ├─ Parse JSON body, check system field for routing marker
-                              ├─ If marker found + config:
-                              │   ├─ Translate Anthropic → OpenAI (RequestToOpenAI)
-                              │   ├─ Build transform chain from provider config
-                              │   ├─ Run request transforms (schema cleaning, tool injection, etc.)
-                              │   ├─ Forward to local provider
-                              │   ├─ Run response/stream transforms (reasoning, tool repair, etc.)
-                              │   └─ Translate OpenAI → Anthropic (ResponseToAnthropic / StreamTranslator)
+                              ├─ If marker found + url=BASE_URL:
+                              │   ├─ Forward request unmodified to BASE_URL
+                              │   └─ Relay response back to Claude Code
                               ├─ If marker found, no config → return stub response
                               └─ If no marker → HTTP/2 to upstream via net/http, relay as HTTP/1.1
 ```
@@ -97,84 +104,21 @@ Claude Code  --CONNECT-->  Proxy (localhost:random)
 | File | Purpose |
 |------|---------|
 | `cmd/claude-hybrid/main.go` | Launcher: CA cert gen (with lock file for multi-instance safety), config load, proxy start, graceful shutdown, exec claude with env vars |
+| `cmd/claude-hybrid/bundle.go` | Combined CA bundle creation: merges system roots + MITM CA into a single PEM file |
+| `cmd/claude-hybrid/claude_unix.go` | Unix: `resolveClaudeBinary()` returns `"claude"` |
+| `cmd/claude-hybrid/claude_windows.go` | Windows: PATH resolution to avoid Desktop app shadowing the CLI binary |
+| `cmd/claude-hybrid/env.go` | Builds child-process environment, stripping stale vars before injecting proxy settings |
+| `cmd/claude-hybrid/selfcheck.go` | Startup self-check: CA cert generation, validation, and lock-file safety |
+| `cmd/claude-hybrid/trust.go` | `claude-hybrid trust install\|status` subcommand dispatcher |
+| `cmd/claude-hybrid/versioning.go` | Build-time version embedding (`-ldflags`) and `--version` output |
 | `internal/proxy/proxy.go` | Core proxy: CONNECT handler, MITM TLS, keep-alive tunnel loop, upstream forwarding, local model forwarding |
 | `internal/proxy/route.go` | Route marker detection in system field + Anthropic stub response (JSON and SSE) |
+| `internal/proxy/errors.go` | Anthropic-format error response builders for local provider failures |
 | `internal/config/config.go` | Constants: timeouts, body size limits, concurrency cap |
-| `internal/config/providers.go` | YAML config parsing (`~/.claude-hybrid/config.yaml`), model label resolution |
+| `internal/config/routes.go` | YAML config parsing (`~/.claude-hybrid/config.yaml`), route and provider resolution |
 | `internal/mitm/mitm.go` | Dynamic per-domain cert generation + LRU tls.Certificate cache |
-| `internal/translate/transformer.go` | Transformer interface, TransformChain, TransformContext |
-| `internal/translate/transform_registry.go` | Transform name → constructor registry, BuildChain |
-| `internal/translate/transform.go` | Schema cleaning transforms (generic, openai, gemini, ollama) |
-| `internal/translate/transform_reasoning.go` | Converts reasoning_content → Anthropic thinking blocks |
-| `internal/translate/transform_enhancetool.go` | Repairs malformed tool call JSON arguments |
-| `internal/translate/transform_cleancache.go` | Strips cache_control from messages |
-| `internal/translate/transform_customparams.go` | Injects custom params from config into request body |
-| `internal/translate/transform_deepseek.go` | Renames max_completion_tokens → max_tokens for DeepSeek |
-| `internal/translate/transform_thinktag.go` | Extracts `<think>` tags from content into thinking blocks |
-| `internal/translate/transform_openrouter.go` | Fixes OpenRouter quirks (tool IDs, cache_control, reasoning) |
-| `internal/translate/transform_groq.go` | Fixes Groq quirks (cache_control, $schema, tool IDs) |
-| `internal/translate/transform_tooluse.go` | ExitTool injection for models that avoid tool use |
-| `internal/translate/transform_forcereasoning.go` | Injects reasoning prompt and extracts reasoning tags |
-| `internal/translate/jsonfix.go` | Relaxed JSON parser for tool argument repair |
-| `internal/translate/request.go` | Anthropic Messages API → OpenAI Chat Completions API request translation |
-| `internal/translate/response.go` | OpenAI → Anthropic response translation, error classification (ClassifyError), SSE error formatting (FormatStreamError) |
-| `internal/translate/stream.go` | OpenAI SSE → Anthropic SSE streaming state machine, consecutive-drop abort |
-
-## Provider Config with Transforms
-
-Providers can specify a `transform` array at the provider level (applied to all models) and/or per-model:
-
-```yaml
-providers:
-  - name: deepseek
-    endpoint: https://api.deepseek.com/v1
-    api_key: ${DEEPSEEK_API_KEY}
-    transform: ["deepseek", "reasoning", "enhancetool", "schema:generic"]
-    models:
-      reasoner: deepseek-reasoner
-      chat:
-        model: deepseek-chat
-        transform: ["tooluse", "enhancetool", "schema:generic"]
-```
-
-Per-model `transform` overrides the provider-level `transform` (no merging).
-
-Providers and models can also specify `params` to inject custom key-value pairs into the request body (requires `customparams` in the transform chain). Per-model `params` overrides provider-level `params`. Only new keys are added — existing request fields are never overwritten.
-
-```yaml
-providers:
-  - name: example
-    endpoint: https://api.example.com/v1
-    api_key: ${EXAMPLE_API_KEY}
-    transform: ["customparams", "schema:generic"]
-    params:
-      top_k: 40
-      presence_penalty: 0.5
-    models:
-      fast:
-        model: example-fast
-        params:              # overrides provider-level params for this model
-          top_k: 20
-```
-
-## Available Transforms
-
-| Transform | What it does |
-|-----------|-------------|
-| `schema:generic` | Strips additionalProperties, $schema, strict from tool schemas |
-| `schema:openai` | Strips only strict |
-| `schema:gemini` | Strips Gemini-incompatible schema fields and format values |
-| `schema:ollama` | Same as generic |
-| `cleancache` | Strips cache_control from messages (needed by most non-Anthropic providers) |
-| `customparams` | Injects custom parameters from config `params` into request body |
-| `reasoning` | Converts reasoning_content → Anthropic thinking blocks |
-| `enhancetool` | Repairs malformed tool call JSON arguments |
-| `deepseek` | Caps max_tokens to 8192 |
-| `extrathinktag` | Extracts `<think>` tags from content into thinking blocks |
-| `openrouter` | Fixes OpenRouter quirks (tool IDs, cache_control, reasoning field) |
-| `groq` | Fixes Groq quirks (cache_control, $schema, tool IDs) |
-| `tooluse` | Injects ExitTool for models that avoid tool use |
-| `forcereasoning` | Injects reasoning prompt and extracts reasoning tags |
+| `providers/opencode/main.go` | opencode-bridge: Anthropic-API-compatible server that delegates to opencode CLI via Bash tool_use |
+| `providers/opencode/cache.go` | Per-agent opencode session ID cache with TTL |
 
 ## Testing
 

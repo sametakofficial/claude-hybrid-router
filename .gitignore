@@ -8,7 +8,10 @@ certs/
 
 # Go
 /claude-hybrid
+/claude-hybrid.exe
+/claude-hybrid-*
 /opencode-bridge
+/opencode-bridge.exe
 coverage.out
 SPEC.md
 

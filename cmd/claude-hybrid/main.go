@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -157,7 +158,7 @@ func main() {
 
 	// Combined CA bundle (system roots + our CA) for tools that accept a
 	// single file via SSL_CERT_FILE / REQUESTS_CA_BUNDLE / etc.
-	bundlePath, err := ensureBundle(*certsDir, certPEM)
+	bundlePath, err := ensureBundle(*certsDir, certPEM, log.Printf)
 	if err != nil {
 		log.Fatalf("ensure bundle: %v", err)
 	}
@@ -212,9 +213,20 @@ func main() {
 	srv := &http.Server{Handler: p}
 	go srv.Serve(ln)
 
+	shutdown := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+
 	if *proxyOnly {
 		log.Println("Running in proxy-only mode (Ctrl+C to stop)")
-		select {}
+		<-sigCh
+		shutdown()
+		os.Exit(0)
 	}
 
 	// Launch claude with proxy env vars. claudeArgs was already assembled
@@ -227,25 +239,18 @@ func main() {
 	claudeArgs = append(claudeArgs, fs.Args()...)
 
 	childEnv := buildChildEnv(proxyAddr, certPath, bundlePath)
-	// Debug: print the base URL being set
-	for _, e := range childEnv {
-		if strings.HasPrefix(e, "ANTHROPIC_BASE_URL=") {
-			fmt.Fprintf(os.Stderr, "claude-hybrid: %s\n", e)
-		}
-	}
 	fmt.Fprintf(os.Stderr, "claude-hybrid: launching claude %v\n", claudeArgs)
 
-	cmd := exec.Command("claude", claudeArgs...)
+	go func() {
+		<-sigCh
+		shutdown()
+	}()
+
+	cmd := exec.Command(resolveClaudeBinary(), claudeArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = childEnv
-
-	shutdown := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(ctx)
-	}
 
 	if err := cmd.Run(); err != nil {
 		shutdown()

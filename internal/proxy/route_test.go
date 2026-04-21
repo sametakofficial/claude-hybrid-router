@@ -254,3 +254,23 @@ func TestSendLocalStub_Streaming(t *testing.T) {
 		t.Error("missing stub text in SSE output")
 	}
 }
+
+func TestBypassList(t *testing.T) {
+	for _, host := range []string{
+		"pypi.org", "files.pythonhosted.org", "foo.pythonhosted.org",
+		"registry.npmjs.org", "accounts.google.com",
+		"github.com", "api.github.com", "proxy.golang.org",
+		"crates.io", "sum.golang.org",
+	} {
+		if !shouldBypassMITM(host) {
+			t.Errorf("shouldBypassMITM(%q) = false, want true", host)
+		}
+	}
+	for _, host := range []string{
+		"api.anthropic.com", "api.openai.com", "example.com",
+	} {
+		if shouldBypassMITM(host) {
+			t.Errorf("shouldBypassMITM(%q) = true, want false", host)
+		}
+	}
+}

@@ -12,7 +12,7 @@ import (
 // and similar tools take a single file via SSL_CERT_FILE / REQUESTS_CA_BUNDLE
 // and replace — not extend — their built-in trust when it is set. Pointing
 // them at this combined bundle preserves system trust while adding ours.
-func ensureBundle(certsDir string, caPEM []byte) (string, error) {
+func ensureBundle(certsDir string, caPEM []byte, logf func(string, ...interface{})) (string, error) {
 	bundlePath := filepath.Join(certsDir, "bundle.crt")
 
 	var buf bytes.Buffer
@@ -22,6 +22,8 @@ func ensureBundle(certsDir string, caPEM []byte) (string, error) {
 			if !bytes.HasSuffix(data, []byte("\n")) {
 				buf.WriteByte('\n')
 			}
+		} else if logf != nil {
+			logf("warn: system CA bundle %s not readable — bundle contains only MITM CA", sys)
 		}
 	}
 	buf.WriteString("# claude-hybrid MITM CA\n")

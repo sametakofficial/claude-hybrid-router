@@ -29,6 +29,7 @@ var overrideVars = map[string]struct{}{
 	"AWS_CA_BUNDLE":               {},
 	"DENO_CERT":                   {},
 	"GRPC_DEFAULT_SSL_ROOTS_FILE_PATH": {},
+	"CLAUDE_CODE_CERT_STORE":           {},
 }
 
 // buildChildEnv constructs the environment for the Claude Code subprocess.
@@ -67,6 +68,7 @@ func buildChildEnv(proxyAddr, caCertPath, bundlePath string) []string {
 		"AWS_CA_BUNDLE="+bundlePath,
 		"DENO_CERT="+bundlePath,
 		"GRPC_DEFAULT_SSL_ROOTS_FILE_PATH="+bundlePath,
+		"CLAUDE_CODE_CERT_STORE=system,bundled",
 	)
 	return env
 }
