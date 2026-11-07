@@ -160,8 +160,25 @@ func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, body []byte,
 	e.InputTokens, e.OutputTokens = sw.usage.in, sw.usage.out
 	if e.Status >= 400 {
 		e.Error = sw.errText()
+		if e.Status == http.StatusTooManyRequests {
+			e.Error = rateLimitInfo(sw.Header(), e.Error)
+		}
 	}
 	p.rec.Add(e)
+}
+
+// rateLimitInfo explains an Anthropic 429 using its response headers.
+func rateLimitInfo(h http.Header, msg string) string {
+	parts := []string{"Anthropic rate limit (Claude Code retries automatically)"}
+	if msg != "" && msg != "Error" {
+		parts = append(parts, msg)
+	}
+	for _, k := range []string{"retry-after", "anthropic-ratelimit-unified-status", "anthropic-ratelimit-unified-reset", "anthropic-ratelimit-unified-representative-claim"} {
+		if v := h.Get(k); v != "" {
+			parts = append(parts, k+"="+v)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (p *Proxy) fail(w http.ResponseWriter, e stats.Entry, code int, msg string, countOnly bool) {

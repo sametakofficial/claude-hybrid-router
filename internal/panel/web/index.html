@@ -133,7 +133,7 @@ td.errc.open .t{white-space:pre-wrap;word-break:break-word}
 .preset{text-align:left;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer;color:var(--fg);font:inherit}
 .preset:hover{border-color:var(--accent)}
 .preset b{display:block;margin-bottom:2px}
-.preset span{color:var(--muted);font-size:12px;display:block;word-break:break-all}
+.preset span{color:var(--muted);font-size:12px;display:block;overflow-wrap:anywhere}
 .cdot{width:10px;height:10px;border-radius:50%;flex:none;border:1px solid var(--line)}
 .backdrop{position:fixed;inset:0;background:rgba(10,12,15,.5);z-index:50;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto}
 .modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:100%;max-width:620px;box-shadow:0 20px 60px rgba(0,0,0,.3);display:flex;flex-direction:column}
@@ -157,6 +157,30 @@ textarea.yaml{min-height:60vh;font-family:var(--mono);font-size:12.5px;line-heig
 .kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:13px}
 .kv div:nth-child(odd){color:var(--muted)}
 .kv div{word-break:break-all}
+.rt-sel{font-family:var(--mono);font-size:12.5px}
+.rt-compact{max-width:100%;font-size:12px;padding:4px 6px;margin-top:8px}
+.runs{display:flex;flex-direction:column;gap:2px;margin-top:8px}
+.runs>span{font-size:11.5px;color:var(--muted);font-weight:600}
+.stline{font-size:12.5px;color:var(--muted);min-height:18px}
+.stline.ok{color:var(--ok)}.stline.err{color:var(--err);white-space:pre-wrap;word-break:break-word}
+.mlist{max-height:260px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:2px 10px;margin:8px 0;font-family:var(--mono);font-size:12px}
+.mlist label{display:flex;gap:6px;align-items:center;word-break:break-all;padding:2px 0;cursor:pointer}
+.mlist .tag{font-family:system-ui,sans-serif;font-size:11px;color:var(--muted)}
+details.adv{margin:4px 0 12px}
+details.adv>summary{cursor:pointer;color:var(--muted);font-size:13px;font-weight:600;user-select:none}
+details.adv[open]>summary{margin-bottom:10px}
+.toolgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px 10px;margin-top:6px}
+.toolgrid label{display:flex;gap:6px;align-items:flex-start;font-size:13px;cursor:pointer}
+.toolgrid label small{display:block;color:var(--muted);font-size:11.5px}
+.toolgrid.off label{opacity:.45}
+.swatches{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.sw{width:26px;height:26px;border-radius:50%;border:2px solid var(--line);cursor:pointer;padding:0;background:var(--panel);font-size:11px;color:var(--muted)}
+.sw.on{outline:2px solid var(--accent);outline-offset:2px}
+.sw.none{width:auto;border-radius:999px;padding:0 10px}
+.where{border:1px solid var(--accent-soft);border-radius:10px;padding:10px 12px 2px;margin-bottom:12px;background:var(--panel)}
+.where>b{display:block;margin-bottom:6px}
+.idtxt{font-size:12px;color:var(--muted)}
+.ra{display:flex;gap:4px;justify-content:flex-end}
 @media (max-width:760px){
   .top{flex-wrap:wrap;gap:6px 10px;padding:8px 12px}
   nav#tabs{order:3;flex-basis:100%}
@@ -304,9 +328,43 @@ function setOnline(on) {
 
 /* ---------- state ---------- */
 const state = {
-  status: null, providers: [], agents: [], rules: [], presets: null,
+  status: null, providers: [], agents: [], rules: [], presets: null, meta: null,
   logs: [], lastLogId: 0, logsLoaded: false, paused: false, logFilter: 'all', openErr: new Set()
 };
+/* Built-in fallback when the server has no /api/meta yet. */
+const META_DEFAULT = {
+  tools: [
+    { name: 'Read', desc: 'Read files' }, { name: 'Write', desc: 'Create files' }, { name: 'Edit', desc: 'Change files' },
+    { name: 'Glob', desc: 'Find files by name' }, { name: 'Grep', desc: 'Search in files' }, { name: 'Bash', desc: 'Run commands' },
+    { name: 'WebFetch', desc: 'Open web pages' }, { name: 'WebSearch', desc: 'Search the web' }, { name: 'Task', desc: 'Start subagents' },
+    { name: 'TodoWrite', desc: 'Keep a todo list' }, { name: 'NotebookEdit', desc: 'Edit notebooks' }
+  ],
+  claude_models: [{ value: '', label: 'Default (inherit)' }, { value: 'sonnet', label: 'Sonnet' }, { value: 'opus', label: 'Opus' }, { value: 'haiku', label: 'Haiku' }],
+  colors: ['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'cyan'],
+  rule_patterns: [
+    { match: 'claude-haiku-*', label: 'Haiku requests (background jobs: titles, summaries)' },
+    { match: 'claude-sonnet-*', label: 'Sonnet requests' }, { match: 'claude-opus-*', label: 'Opus requests' }, { match: '*', label: 'Everything' }
+  ],
+  agent_templates: [
+    { id: 'code-reviewer', name: 'code-reviewer', description: 'Reviews code changes for bugs and unclear code. Use after writing or changing code.', tools: 'Read, Grep, Glob, Bash',
+      prompt: 'You are a careful code reviewer. Read the changed code, find real bugs, risky edge cases and unclear parts. Report each finding with file, line and a short fix. Do not rewrite code unless asked.' },
+    { id: 'researcher', name: 'researcher', description: 'Finds information in the codebase or on the web and reports a short summary.', tools: 'Read, Grep, Glob, WebFetch, WebSearch',
+      prompt: 'You are a researcher. Find the facts needed to answer the question. Read sources, then give a short, clear summary with file paths or links.' },
+    { id: 'test-writer', name: 'test-writer', description: 'Writes and runs tests for a given piece of code.', tools: 'Read, Write, Edit, Grep, Glob, Bash',
+      prompt: 'You write tests. Look at how the project already tests code, follow the same style, add tests for normal and edge cases, run them and report the result.' },
+    { id: 'doc-writer', name: 'doc-writer', description: 'Writes or updates documentation and comments.', tools: 'Read, Write, Edit, Grep, Glob',
+      prompt: 'You write documentation. Use short, plain sentences. Explain what the code does and how to use it, with small examples.' },
+    { id: 'blank', name: '', description: '', tools: '', prompt: '' }
+  ]
+};
+async function loadMeta() {
+  if (state.meta) return state.meta;
+  let m = null;
+  try { m = await api('GET', '/api/meta'); } catch (e) { m = null; }
+  const out = {};
+  for (const k of Object.keys(META_DEFAULT)) out[k] = m && Array.isArray(m[k]) && m[k].length ? m[k] : META_DEFAULT[k];
+  return (state.meta = out);
+}
 const loadProviders = async () => (state.providers = (await api('GET', '/api/providers')) || []);
 const loadAgents = async () => (state.agents = (await api('GET', '/api/agents')) || []);
 const loadRules = async () => (state.rules = (await api('GET', '/api/rules')) || []);
@@ -350,23 +408,36 @@ function routeBadge(r) {
   if (!r || !r.provider) return '<span class="badge">Anthropic</span>';
   return `<span class="badge routed" title="Routed">${h(r.provider)} / ${h(r.model || 'same model')}</span>`;
 }
+/* One select value encodes provider + model. */
+const rv = (p, m) => JSON.stringify([p || '', p ? m || '' : '']);
+function parseRv(v) { try { const a = JSON.parse(v); return { provider: a[0] || '', model: a[0] ? a[1] || '' : '' }; } catch (e) { return { provider: '', model: '' }; } }
+function totalModels() { return state.providers.filter(p => p.enabled).reduce((n, p) => n + (p.models || []).length, 0); }
+/* Options for the "Runs on" select. q filters model ids; the current choice always stays. */
+function routeOptions(r, q) {
+  q = (q || '').trim().toLowerCase();
+  const cur = rv(r.provider, r.model);
+  const sel = v => (v === cur ? ' selected' : '');
+  let html = `<option value="${h(rv('', ''))}"${sel(rv('', ''))}>Anthropic — your Claude subscription</option>`;
+  const groups = state.providers.filter(p => p.enabled || p.id === r.provider).map(p => ({ id: p.id, label: (p.name || p.id) + (p.enabled ? '' : ' (disabled)'), models: p.models || [] }));
+  if (r.provider && !groups.some(g => g.id === r.provider)) groups.push({ id: r.provider, label: r.provider + ' (missing provider)', models: [] });
+  for (const g of groups) {
+    const items = [['', 'Same model as request']].concat(g.models.map(x => [x, x]));
+    if (g.id === r.provider && r.model && !g.models.includes(r.model)) items.push([r.model, r.model + ' (not in list)']);
+    const shown = items.filter(([m, l]) => !q || rv(g.id, m) === cur || l.toLowerCase().includes(q) || g.label.toLowerCase().includes(q));
+    if (!shown.length) continue;
+    html += `<optgroup label="${h(g.label)}">` + shown.map(([m, l]) => `<option value="${h(rv(g.id, m))}"${sel(rv(g.id, m))}>${h(l)}</option>`).join('') + '</optgroup>';
+  }
+  return html;
+}
 function mountRoute(el, route) {
   const r = Object.assign({}, ROUTE_DEFAULT, route || {});
-  const id = 'rt' + (++uidN);
-  const provs = state.providers.filter(p => p.enabled);
-  const known = state.providers.find(p => p.id === r.provider);
-  let opts = `<option value="">Anthropic (subscription)</option>` +
-    provs.map(p => `<option value="${h(p.id)}"${p.id === r.provider ? ' selected' : ''}>${h(p.name || p.id)} (${h(p.id)})</option>`).join('');
-  if (r.provider && !provs.some(p => p.id === r.provider))
-    opts += `<option value="${h(r.provider)}" selected>${h(r.provider)} (${known ? 'disabled' : 'missing'})</option>`;
   const advOpen = r.max_tokens || r.temperature != null || r.reasoning_effort || (r.system_mode && r.system_mode !== 'keep');
+  const many = totalModels() > 30;
   el.innerHTML = `<div class="route">
-    <div class="grid2">
-      <label class="f"><span>Provider</span><select class="rt-prov">${opts}</select>
-        <small class="rt-provhint"></small></label>
-      <label class="f rt-on"><span>Model</span><input class="rt-model mono" list="${id}-dl" value="${h(r.model)}" placeholder="keep the request's model" spellcheck="false"><datalist id="${id}-dl"></datalist>
-        <small>Pick from the list or type any model id.</small></label>
-    </div>
+    <label class="f"><span>Runs on</span>
+      ${many ? '<input class="rt-q" type="search" placeholder="Filter models…" spellcheck="false" autocomplete="off">' : ''}
+      <select class="rt-sel">${routeOptions(r)}</select>
+      <small class="rt-provhint"></small></label>
     <details class="rt-on"${advOpen ? ' open' : ''}><summary>Advanced</summary>
       <div class="grid3">
         <label class="f"><span>Max tokens cap</span><input class="rt-max" type="number" min="0" step="1" value="${r.max_tokens ? h(r.max_tokens) : ''}" placeholder="no cap"></label>
@@ -383,24 +454,26 @@ function mountRoute(el, route) {
       </select></label>
       <label class="f rt-sysw"><textarea class="rt-sys mono" rows="5" placeholder="System prompt text">${h(r.system_prompt)}</textarea></label>
     </details></div>`;
-  const prov = $('.rt-prov', el), mode = $('.rt-mode', el);
+  const sel = $('.rt-sel', el), mode = $('.rt-mode', el), q = $('.rt-q', el);
   const sync = () => {
-    const pid = prov.value;
-    const p = state.providers.find(x => x.id === pid);
-    $$('.rt-on', el).forEach(x => (x.style.display = pid ? '' : 'none'));
-    $('.rt-provhint', el).textContent = pid ? (p ? `${p.type} · ${(p.models || []).length} models` : 'Provider not found') : 'Pass-through to Anthropic. No changes.';
-    $(`#${id}-dl`, el).innerHTML = (p && p.models || []).map(m => `<option value="${h(m)}">`).join('');
+    const c = parseRv(sel.value);
+    const p = state.providers.find(x => x.id === c.provider);
+    $$('.rt-on', el).forEach(x => (x.style.display = c.provider ? '' : 'none'));
+    $('.rt-provhint', el).textContent = c.provider
+      ? (p ? `${p.name || p.id} · ${p.type === 'anthropic' ? 'Anthropic-compatible' : 'OpenAI-compatible'}${c.model ? '' : ' · uses the model Claude Code asks for'}` : 'Provider not found')
+      : 'Normal Claude Code. Nothing changes.';
     $('.rt-sysw', el).style.display = mode.value === 'keep' ? 'none' : '';
   };
-  prov.onchange = sync; mode.onchange = sync; sync();
+  if (q) q.oninput = () => { const c = parseRv(sel.value); sel.innerHTML = routeOptions(Object.assign({}, r, c), q.value); sync(); };
+  sel.onchange = sync; mode.onchange = sync; sync();
   el._get = () => {
-    const pid = prov.value;
+    const c = parseRv(sel.value);
     const t = $('.rt-temp', el).value.trim();
     const tv = t === '' ? null : parseFloat(t);
-    if (!pid) return Object.assign({}, ROUTE_DEFAULT, { system_prompt: r.system_prompt || '' }, { provider: '' });
+    if (!c.provider) return Object.assign({}, ROUTE_DEFAULT, { system_prompt: r.system_prompt || '' }, { provider: '' });
     return {
-      provider: pid,
-      model: $('.rt-model', el).value.trim(),
+      provider: c.provider,
+      model: c.model,
       max_tokens: Math.max(0, parseInt($('.rt-max', el).value, 10) || 0),
       temperature: tv == null || isNaN(tv) ? null : tv,
       reasoning_effort: $('.rt-eff', el).value,
@@ -439,7 +512,7 @@ window.addEventListener('hashchange', render);
 
 /* ---------- dashboard ---------- */
 views.dashboard = async (v, alive) => {
-  await Promise.all([loadStatus(), state.logsLoaded ? null : fetchLogs()]);
+  await Promise.all([loadStatus(), state.logsLoaded ? null : fetchLogs(), loadAgents().catch(() => null)]);
   if (!alive()) return;
   v.innerHTML = '<div id="dash"></div>';
   paintDash();
@@ -471,6 +544,8 @@ function paintDash() {
     <div>Config</div><div><code>${h(s.config_path)}</code></div>
     <div>Agents dir</div><div><code>${h(s.agents_dir)}</code></div>
   </div></div>
+  <h4>Routed agents</h4>
+  ${routedAgentsHTML()}
   <h4>Targets</h4>
   ${targets.length ? `<div class="tablewrap"><table><thead><tr><th>Target</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Tokens in</th><th class="num">Tokens out</th><th class="num">Avg latency</th></tr></thead><tbody>
     ${targets.map(t => `<tr><td><code>${h(t.target)}</code></td><td class="num">${h(fmtNum(t.requests))}</td><td class="num">${t.errors ? `<span style="color:var(--err)">${h(fmtNum(t.errors))}</span>` : '0'}</td><td class="num">${h(fmtNum(t.input_tokens))}</td><td class="num">${h(fmtNum(t.output_tokens))}</td><td class="num">${h(fmtNum(Math.round(t.avg_latency_ms || 0)))} ms</td></tr>`).join('')}
@@ -479,6 +554,17 @@ function paintDash() {
   ${logTable(recent, false)}`;
   $('#copyCmd').onclick = () => copyText(cmd);
   bindLogTable(d);
+}
+
+function routedAgentsHTML() {
+  const ra = state.agents.filter(a => a.route && a.route.provider).sort((a, b) => a.name.localeCompare(b.name));
+  if (!ra.length) return `<div class="empty">No routed agents. All agents use your subscription. <a href="#agents">Pick where agents run →</a></div>`;
+  return `<div class="tablewrap"><table><thead><tr><th>Agent</th><th>Runs on</th></tr></thead><tbody>
+    ${ra.map(a => {
+      const p = state.providers.find(x => x.id === a.route.provider);
+      return `<tr><td><span class="cdot" style="display:inline-block;margin-right:6px;background:${COLORS[a.color] || 'transparent'}"></span><b>${h(a.name)}</b></td>
+        <td>${h(p ? p.name || p.id : a.route.provider)} / <span class="mono">${h(a.route.model || 'same model')}</span></td></tr>`;
+    }).join('')}</tbody></table></div>`;
 }
 
 /* ---------- logs ---------- */
@@ -497,7 +583,7 @@ function logTable(list, full) {
     <td class="num">${h(fmtNum(e.latency_ms))} ms</td>
     <td class="num">${h(fmtNum(e.input_tokens))} / ${h(fmtNum(e.output_tokens))}</td>
     ${full ? `<td class="mono muted">${h(e.path)}</td>` : ''}
-    <td class="errc${state.openErr.has(e.id) ? ' open' : ''}" data-id="${h(e.id)}" title="${e.error ? 'Click to expand' : ''}"><span class="t">${h(e.error)}</span></td>
+    <td class="errc${state.openErr.has(e.id) ? ' open' : ''}" data-id="${h(e.id)}" title="${e.error ? 'Click to expand' : ''}"><span class="t">${h(e.error)}</span>${e.status === 429 && e.kind !== 'routed' ? '<small class="muted" style="display:block;white-space:normal">Anthropic rate limit — Claude Code retries automatically.</small>' : ''}</td>
   </tr>`).join('')}</tbody></table></div>`;
 }
 function bindLogTable(root) {
@@ -553,64 +639,144 @@ setInterval(async () => {
 
 /* ---------- agents ---------- */
 const COLORS = { red: '#e5484d', blue: '#3e7bfa', green: '#30a46c', yellow: '#e2b308', purple: '#8e4ec6', orange: '#f76b15', pink: '#d6409f', cyan: '#05a2c2' };
+const sanitizeName = s => String(s || '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_.-]/g, '');
+const splitTools = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean);
+function uniqueName(base) {
+  base = sanitizeName(base);
+  if (!base || !state.agents.some(x => x.name === base)) return base;
+  let n = 2; while (state.agents.some(x => x.name === base + '-' + n)) n++;
+  return base + '-' + n;
+}
+async function saveAgentRoute(a, sel) {
+  const c = parseRv(sel.value);
+  const route = c.provider ? Object.assign({}, ROUTE_DEFAULT, a.route || {}, c) : Object.assign({}, ROUTE_DEFAULT);
+  const prev = a.route;
+  sel.disabled = true;
+  try {
+    const saved = await api('PUT', '/api/agents/' + enc(a.name), Object.assign({}, a, { route }));
+    a.route = (saved && saved.route) || route;
+    toast('Saved', 'ok');
+  } catch (e) {
+    a.route = prev;
+    sel.innerHTML = routeOptions(Object.assign({}, ROUTE_DEFAULT, prev || {}));
+    toast(e.message || String(e), 'err');
+  } finally { sel.disabled = false; }
+}
 views.agents = async (v, alive) => {
-  await Promise.all([loadProviders(), loadAgents()]);
+  await Promise.all([loadProviders(), loadAgents(), loadMeta()]);
   if (!alive()) return;
   const list = state.agents.slice().sort((a, b) => a.name.localeCompare(b.name));
   v.innerHTML = `<div class="bar"><h2>Agents</h2><span class="muted">${list.length}</span><div class="grow"></div>
     <button class="btn primary" id="newAgent">+ New agent</button></div>
-    <p class="hint">Claude Code subagents (<code>~/.claude/agents/*.md</code>). Set a route to send an agent's requests to another provider.</p>
+    <p class="hint">Claude Code subagents (<code>~/.claude/agents/*.md</code>). Pick where each agent runs. Changes save at once.</p>
     ${list.length ? `<div class="cards">${list.map((a, i) => `<div class="card click" data-i="${i}" tabindex="0">
       <div class="title"><span class="cdot" style="background:${COLORS[a.color] || 'transparent'}"></span>${h(a.name)}</div>
       <div class="desc">${h(a.description) || '<i>No description</i>'}</div>
-      <div class="meta">${routeBadge(a.route)}<span class="badge" title="Claude model">${h(a.model || 'inherit')}</span>${a.tools ? `<span class="badge" title="${h(a.tools)}">${h(a.tools.split(',').length)} tools</span>` : ''}</div>
-    </div>`).join('')}</div>` : '<div class="empty">No agents yet. Create one to get started.</div>'}`;
-  $('#newAgent').onclick = () => openAgentEditor(null);
+      <div class="meta"><span class="badge" title="Claude model">${h(a.model || 'inherit')}</span><span class="badge" title="${h(a.tools || 'All tools')}">${a.tools ? h(splitTools(a.tools).length) + ' tools' : 'All tools'}</span></div>
+      <label class="runs"><span>Runs on</span><select class="rt-compact rt-sel" data-i="${i}">${routeOptions(Object.assign({}, ROUTE_DEFAULT, a.route || {}))}</select></label>
+    </div>`).join('')}</div>` : '<div class="empty">No agents yet. Click “New agent” and pick a template.</div>'}`;
+  $('#newAgent').onclick = openTemplatePicker;
   $$('.card[data-i]', v).forEach(c => {
     const a = list[Number(c.dataset.i)];
-    c.onclick = () => openAgentEditor(a);
-    c.onkeydown = e => { if (e.key === 'Enter') openAgentEditor(a); };
+    c.onclick = e => { if (!e.target.closest('.runs')) openAgentEditor(a); };
+    c.onkeydown = e => { if (e.key === 'Enter' && !e.target.closest('.runs')) openAgentEditor(a); };
+  });
+  $$('select.rt-compact', v).forEach(sel => {
+    sel.onclick = e => e.stopPropagation();
+    sel.onchange = () => saveAgentRoute(list[Number(sel.dataset.i)], sel);
   });
 };
-function openAgentEditor(orig) {
+async function openTemplatePicker() {
+  await run(async () => {
+    const meta = await loadMeta();
+    const tpls = meta.agent_templates.slice().sort((a, b) => (a.id === 'blank') - (b.id === 'blank'));
+    const m = openModal({
+      title: 'New agent', wide: true,
+      body: `<p class="hint">Pick a starting point. You can change everything on the next screen.</p><div class="presets">
+        ${tpls.map((t, i) => `<button class="preset" data-i="${i}"><b>${h(t.id === 'blank' ? 'Blank' : t.name || t.id)}</b><span>${h(t.id === 'blank' ? 'Empty form' : t.description)}</span>${t.id !== 'blank' ? `<span>Tools: ${h(t.tools || 'all')}</span>` : ''}</button>`).join('')}
+      </div>`
+    });
+    $$('.preset', m).forEach(b => (b.onclick = () => {
+      const t = tpls[Number(b.dataset.i)] || {};
+      openAgentEditor(null, { name: uniqueName(t.name || ''), description: t.description || '', tools: t.tools || '', prompt: t.prompt || '' });
+    }));
+  });
+}
+function openAgentEditor(orig, tpl) {
   const isNew = !orig;
-  const a = Object.assign({ name: '', description: '', tools: '', model: '', color: '', prompt: '', route: {} }, clone(orig) || {});
-  const colors = [''].concat(Object.keys(COLORS));
+  const meta = state.meta || META_DEFAULT;
+  const a = Object.assign({ name: '', description: '', tools: '', model: '', color: '', prompt: '', route: {} }, clone(orig) || {}, isNew ? tpl || {} : {});
+  // Claude model select
+  const modelVal = a.model === 'inherit' ? '' : a.model;
+  const mopts = meta.claude_models.slice();
+  if (modelVal && !mopts.some(x => x.value === modelVal)) mopts.push({ value: modelVal, label: modelVal });
+  // tools
+  const cur = splitTools(a.tools);
+  const toolList = meta.tools.map(t => ({ name: t.name, desc: t.desc }));
+  cur.forEach(n => { if (!toolList.some(t => t.name === n)) toolList.push({ name: n, desc: 'from file' }); });
+  const allTools = !a.tools.trim();
+  // colors
+  const colors = [''].concat(meta.colors);
   if (a.color && !colors.includes(a.color)) colors.push(a.color);
   const m = openModal({
     title: isNew ? 'New agent' : 'Edit agent: ' + a.name, wide: true,
     body: `<div class="grid2">
-      <label class="f"><span>Name</span><input id="ag-name" value="${h(a.name)}" placeholder="my-agent" spellcheck="false" autocomplete="off"><small>Letters, digits, <code>. _ -</code>. Also the file name.</small></label>
-      <label class="f"><span>Claude model</span><input id="ag-model" list="ag-models" value="${h(a.model)}" placeholder="inherit" spellcheck="false">
-        <datalist id="ag-models"><option value="inherit"><option value="sonnet"><option value="opus"><option value="haiku"></datalist>
-        <small>What Claude Code requests. A route below can send it elsewhere.</small></label>
+      <label class="f"><span>Name</span><input id="ag-name" value="${h(a.name)}" placeholder="my-agent" spellcheck="false" autocomplete="off"><small>Lowercase, no spaces. Also the file name.</small></label>
+      <label class="f"><span>Claude model</span><select id="ag-model">${mopts.map(x => `<option value="${h(x.value)}"${x.value === modelVal ? ' selected' : ''}>${h(x.label)}</option>`).join('')}</select>
+        <small>What Claude Code asks for. “Runs on” below can send it elsewhere.</small></label>
     </div>
-    <label class="f"><span>Description</span><textarea id="ag-desc" rows="3">${h(a.description)}</textarea><small>Claude reads this to decide when to use the agent.</small></label>
-    <div class="grid2">
-      <label class="f"><span>Tools</span><input id="ag-tools" value="${h(a.tools)}" placeholder="Read, Grep, Glob" spellcheck="false"><small>Comma separated. Empty = all tools.</small></label>
-      <label class="f"><span>Color</span><select id="ag-color">${colors.map(c => `<option value="${h(c)}"${c === a.color ? ' selected' : ''}>${h(c || 'none')}</option>`).join('')}</select></label>
+    <label class="f"><span>Description</span><textarea id="ag-desc" rows="2">${h(a.description)}</textarea><small>Claude reads this to decide when to use the agent.</small></label>
+    <div class="where"><b>Where does this agent run?</b><div id="ag-route"></div></div>
+    <div class="f"><span>Tools</span>
+      <label class="check"><input type="checkbox" id="ag-all"${allTools ? ' checked' : ''}> <b>All tools</b></label>
+      <div class="toolgrid${allTools ? ' off' : ''}" id="ag-tools">${toolList.map(t => `<label><input type="checkbox" value="${h(t.name)}"${allTools || cur.includes(t.name) ? ' checked' : ''}${allTools ? ' disabled' : ''}><div>${h(t.name)}<small>${h(t.desc || '')}</small></div></label>`).join('')}</div>
     </div>
+    <div class="f"><span>Color</span><div class="swatches" id="ag-color">${colors.map(c => c
+      ? `<button type="button" class="sw${c === a.color ? ' on' : ''}" data-c="${h(c)}" title="${h(c)}" style="background:${COLORS[c] || 'var(--panel2)'}">${COLORS[c] ? '' : h(c.slice(0, 2))}</button>`
+      : `<button type="button" class="sw none${!a.color ? ' on' : ''}" data-c="" title="No color">none</button>`).join('')}</div></div>
     ${a.file ? `<p class="muted small" style="margin-top:0">File: <code>${h(a.file)}</code></p>` : ''}
-    <label class="f"><span>System prompt</span><textarea id="ag-prompt" class="mono" rows="14" spellcheck="false">${h(a.prompt)}</textarea></label>
-    <h4>Routing</h4><div id="ag-route"></div>`,
+    <label class="f"><span>Instructions (system prompt)</span><textarea id="ag-prompt" class="mono" rows="12" spellcheck="false" placeholder="You are …">${h(a.prompt)}</textarea></label>`,
     foot: `${isNew ? '' : '<button class="btn danger" id="ag-del">Delete</button>'}<div class="grow"></div>
       <button class="btn" data-close>Cancel</button><button class="btn primary" id="ag-save">Save</button>`
   });
   const re = mountRoute($('#ag-route', m), a.route);
-  if (isNew) $('#ag-name', m).focus();
+  const nameIn = $('#ag-name', m);
+  nameIn.oninput = () => {
+    const pos = nameIn.selectionStart, before = nameIn.value, after = sanitizeName(before);
+    if (after !== before) { nameIn.value = after; const p = Math.max(0, pos - (before.length - after.length)); nameIn.setSelectionRange(p, p); }
+  };
+  if (isNew) nameIn.focus();
+  const allCb = $('#ag-all', m), grid = $('#ag-tools', m);
+  allCb.onchange = () => {
+    grid.classList.toggle('off', allCb.checked);
+    $$('input', grid).forEach(c => { c.disabled = allCb.checked; if (allCb.checked) c.checked = true; });
+  };
+  let color = a.color || '';
+  $('#ag-color', m).onclick = e => {
+    const b = e.target.closest('.sw'); if (!b) return;
+    color = b.dataset.c;
+    $$('.sw', m).forEach(x => x.classList.toggle('on', x === b));
+  };
   $('#ag-save', m).onclick = e => run(async () => {
-    const name = $('#ag-name', m).value.trim();
+    const name = nameIn.value.trim();
+    if (!name) throw new Error('Please enter a name');
     if (!/^[A-Za-z0-9_.-]+$/.test(name)) throw new Error('Name may only use letters, digits, . _ -');
+    let tools = '';
+    if (!allCb.checked) {
+      const picked = $$('input:checked', grid).map(c => c.value);
+      if (!picked.length) throw new Error('Pick at least one tool, or check “All tools”');
+      tools = picked.join(', ');
+    }
+    let model = $('#ag-model', m).value;
+    if (!model && a.model === 'inherit') model = 'inherit';
     const body = Object.assign({}, a, {
       name,
       description: $('#ag-desc', m).value.trim(),
-      tools: $('#ag-tools', m).value.trim(),
-      model: $('#ag-model', m).value.trim(),
-      color: $('#ag-color', m).value,
+      tools, model, color,
       prompt: $('#ag-prompt', m).value,
       route: re._get()
     });
-    if (isNew && state.agents.some(x => x.name === name)) throw new Error('An agent with this name already exists');
+    if ((isNew || name !== orig.name) && state.agents.some(x => x.name === name)) throw new Error('An agent with this name already exists');
     await api('PUT', '/api/agents/' + enc(isNew ? name : orig.name), body);
     closeModal();
     toast('Agent saved', 'ok');
@@ -632,26 +798,67 @@ function keyStatus(p) {
   if (p.api_key_env) return `<span class="badge info">Env: ${h(p.api_key_env)}</span>`;
   return '<span class="badge">No key</span>';
 }
+function slugId(name, selfId) {
+  let base = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'provider';
+  const taken = id => id !== selfId && state.providers.some(x => x.id === id);
+  if (!taken(base)) return base;
+  let n = 2; while (taken(base + '-' + n)) n++;
+  return base + '-' + n;
+}
+function testResultHTML(r) {
+  return r && r.ok
+    ? `<p><span class="badge ok">OK</span> <span class="muted small">${h(fmtNum(r.latency_ms))} ms</span></p>${r.reply ? `<pre class="reply">${h(r.reply)}</pre>` : ''}`
+    : `<p><span class="badge err">Failed</span>${r && r.latency_ms ? ` <span class="muted small">${h(fmtNum(r.latency_ms))} ms</span>` : ''}</p><pre class="reply">${h((r && r.error) || 'Unknown error')}</pre>`;
+}
+function mountTest(box, p, models) {
+  box.innerHTML = models.length
+    ? `<div class="row"><select class="t-model mono">${models.map(x => `<option value="${h(x)}">${h(x)}</option>`).join('')}</select><button class="btn" type="button">Test</button></div>
+       <small class="muted">Sends a tiny request using the saved settings.</small><div class="t-out"></div>`
+    : '<p class="muted small">No models saved yet. Load models first.</p>';
+  const b = $('button', box);
+  if (b) b.onclick = e => run(async () => {
+    const out = $('.t-out', box);
+    out.innerHTML = '<p class="muted small">Testing…</p>';
+    try { out.innerHTML = testResultHTML(await api('POST', `/api/providers/${enc(p.id)}/test`, { model: $('.t-model', box).value })); }
+    catch (err) { out.innerHTML = `<pre class="reply" style="color:var(--err)">${h(err.message)}</pre>`; }
+  }, e.target);
+}
+function openTestModal(p) {
+  const m = openModal({ title: 'Test: ' + (p.name || p.id), body: '<div id="tm-box"></div>' });
+  mountTest($('#tm-box', m), p, p.models || []);
+}
 views.providers = async (v, alive) => {
   await loadProviders();
   if (!alive()) return;
   const list = state.providers;
   v.innerHTML = `<div class="bar"><h2>Providers</h2><span class="muted">${list.length}</span><div class="grow"></div>
     <button class="btn primary" id="addProv">+ Add provider</button></div>
-    <p class="hint">APIs that routed requests can go to. OpenAI-compatible or Anthropic-compatible.</p>
-    ${list.length ? `<div class="tablewrap"><table><thead><tr><th>On</th><th>Provider</th><th>Type</th><th>Base URL</th><th class="num">Models</th><th>Key</th></tr></thead><tbody>
+    <p class="hint">Other AI services your agents and rules can run on. Click a row to edit.</p>
+    ${list.length ? `<div class="tablewrap"><table><thead><tr><th>On</th><th>Provider</th><th>Type</th><th class="num">Models</th><th>Key</th><th></th><th>Base URL</th></tr></thead><tbody>
       ${list.map((p, i) => `<tr class="click" data-i="${i}">
         <td><label class="switch" title="Enabled"><input type="checkbox" data-en="${i}"${p.enabled ? ' checked' : ''}><span></span></label></td>
         <td><b>${h(p.name || p.id)}</b><div class="muted small mono">${h(p.id)}</div></td>
-        <td><span class="badge">${h(p.type)}</span></td>
-        <td class="mono small">${h(p.base_url)}</td>
+        <td><span class="badge">${p.type === 'anthropic' ? 'Anthropic' : 'OpenAI'}</span></td>
         <td class="num">${(p.models || []).length}</td>
-        <td>${keyStatus(p)}</td></tr>`).join('')}
-    </tbody></table></div>` : '<div class="empty">No providers yet. Add one from a preset.</div>'}`;
+        <td>${keyStatus(p)}</td>
+        <td><div class="ra"><button class="btn sm" data-act="refresh" data-i="${i}" title="Load the full model list from the provider">↻ Models</button><button class="btn sm" data-act="test" data-i="${i}">Test</button></div></td>
+        <td class="mono small">${h(p.base_url)}</td></tr>`).join('')}
+    </tbody></table></div>` : '<div class="empty">No providers yet. Click “Add provider” and pick one.</div>'}`;
   $('#addProv').onclick = openPresetPicker;
   $$('tr[data-i]', v).forEach(tr => (tr.onclick = e => {
-    if (e.target.closest('.switch')) return;
+    if (e.target.closest('.switch') || e.target.closest('button')) return;
     openProviderEditor(list[Number(tr.dataset.i)], false);
+  }));
+  $$('button[data-act]', v).forEach(b => (b.onclick = e => {
+    e.stopPropagation();
+    const p = list[Number(b.dataset.i)];
+    if (b.dataset.act === 'test') return openTestModal(p);
+    run(async () => {
+      const saved = await api('POST', `/api/providers/${enc(p.id)}/refresh`);
+      toast(`${p.name || p.id}: ${((saved && saved.models) || []).length} models`, 'ok');
+      await loadProviders();
+      if (curTab() === 'providers') views.providers($('#view'), () => true);
+    }, b);
   }));
   $$('input[data-en]', v).forEach(cb => (cb.onchange = () => {
     const p = list[Number(cb.dataset.en)];
@@ -669,16 +876,14 @@ async function openPresetPicker() {
     if (!state.presets) state.presets = (await api('GET', '/api/presets')) || [];
     const m = openModal({
       title: 'Add provider', wide: true,
-      body: `<p class="hint">Pick a template to prefill the form, or start from scratch.</p><div class="presets">
-        ${state.presets.map((p, i) => `<button class="preset" data-i="${i}"><b>${h(p.name)}</b><span>${h(p.type)} · ${h(p.base_url)}</span>${p.note ? `<span>${h(p.note)}</span>` : ''}</button>`).join('')}
-        <button class="preset" data-i="-1"><b>Custom</b><span>Empty form</span></button></div>`
+      body: `<p class="hint">Pick your service. The form is filled in for you.</p><div class="presets">
+        ${state.presets.map((p, i) => `<button class="preset" data-i="${i}"><b>${h(p.name)}</b><span>${h(p.base_url)}</span>${p.note ? `<span>${h(p.note)}</span>` : ''}</button>`).join('')}
+        <button class="preset" data-i="-1"><b>Other</b><span>Any OpenAI- or Anthropic-compatible API</span></button></div>`
     });
     $$('.preset', m).forEach(b => (b.onclick = () => {
       const pr = state.presets[Number(b.dataset.i)];
-      let id = pr ? pr.id : '';
-      if (id && state.providers.some(x => x.id === id)) { let n = 2; while (state.providers.some(x => x.id === id + '-' + n)) n++; id = id + '-' + n; }
       openProviderEditor({
-        id, name: pr ? pr.name : '', type: pr ? pr.type : 'openai', base_url: pr ? pr.base_url : '',
+        id: '', name: pr ? pr.name : '', type: pr ? pr.type : 'openai', base_url: pr ? pr.base_url : '',
         api_key: '', has_api_key: false, api_key_env: pr ? pr.api_key_env || '' : '', headers: {},
         models: pr ? (pr.models || []).slice() : [], max_tokens_field: pr ? pr.max_tokens_field || '' : '', enabled: true
       }, true);
@@ -690,132 +895,165 @@ function hdrRow(k, val) {
 }
 function openProviderEditor(orig, isNew) {
   const p = Object.assign({ id: '', name: '', type: 'openai', base_url: '', api_key: '', has_api_key: false, api_key_env: '', headers: {}, models: [], max_tokens_field: '', enabled: true }, clone(orig));
-  let models = (p.models || []).slice();
+  // Model checklist state: every id we know, and which ones are checked.
+  let all = (p.models || []).slice();
+  const picked = new Set(all);
+  const manual = new Set();
+  let touched = false, live = null;
+  const advOpen = !!(p.api_key_env || Object.keys(p.headers || {}).length || p.max_tokens_field);
   const m = openModal({
     title: isNew ? 'New provider' : 'Provider: ' + (p.name || p.id), wide: true,
-    body: `<div class="grid2">
-      <label class="f"><span>ID</span><input id="pv-id" class="mono" value="${h(p.id)}" ${isNew ? '' : 'disabled'} placeholder="my-provider" spellcheck="false"><small>${isNew ? 'Lowercase slug: a-z 0-9 _ -. Cannot change later.' : 'Used in routes. Cannot be changed.'}</small></label>
-      <label class="f"><span>Name</span><input id="pv-name" value="${h(p.name)}" placeholder="Display name"></label>
-    </div>
+    body: `<label class="f"><span>Name</span><input id="pv-name" value="${h(p.name)}" placeholder="e.g. OpenCode Go" autocomplete="off">
+        <small class="idtxt">ID: <code id="pv-id">${h(isNew ? slugId(p.name) : p.id)}</code>${isNew ? ' (made from the name)' : ''}</small></label>
     <div class="grid2">
-      <label class="f"><span>Type</span><select id="pv-type"><option value="openai"${p.type === 'openai' ? ' selected' : ''}>OpenAI-compatible</option><option value="anthropic"${p.type === 'anthropic' ? ' selected' : ''}>Anthropic-compatible</option></select></label>
-      <label class="f"><span>Base URL</span><input id="pv-url" class="mono" value="${h(p.base_url)}" placeholder="https://api.openai.com/v1" spellcheck="false"><small id="pv-urlhint"></small></label>
+      <label class="f"><span>Type</span><select id="pv-type"><option value="openai"${p.type !== 'anthropic' ? ' selected' : ''}>OpenAI-compatible</option><option value="anthropic"${p.type === 'anthropic' ? ' selected' : ''}>Anthropic-compatible</option></select>
+        <small id="pv-typehint"></small></label>
+      <label class="f"><span>Base URL</span><input id="pv-url" class="mono" value="${h(p.base_url)}" placeholder="https://api.example.com/v1" spellcheck="false"><small id="pv-urlhint"></small></label>
     </div>
-    <div class="grid2">
-      <label class="f"><span>API key</span><input id="pv-key" type="password" autocomplete="new-password" placeholder="${h(p.has_api_key ? p.api_key || '••••' : 'sk-…')}">
-        <small>${p.has_api_key ? 'Leave blank to keep the current key.' : 'Not needed for local servers.'}</small></label>
-      <label class="f"><span>API key env var</span><input id="pv-env" class="mono" value="${h(p.api_key_env)}" placeholder="OPENAI_API_KEY" spellcheck="false"><small>Optional. Read the key from this environment variable.</small></label>
-    </div>
-    <div class="grid2">
-      <label class="f" id="pv-mtfw"><span>Max tokens field</span><select id="pv-mtf">
-        <option value=""${!p.max_tokens_field ? ' selected' : ''}>Default</option>
-        <option value="max_tokens"${p.max_tokens_field === 'max_tokens' ? ' selected' : ''}>max_tokens</option>
-        <option value="max_completion_tokens"${p.max_tokens_field === 'max_completion_tokens' ? ' selected' : ''}>max_completion_tokens</option>
-      </select><small>Newer OpenAI models need max_completion_tokens.</small></label>
-      <div class="f"><span>Enabled</span><label class="check" style="margin-top:6px"><input type="checkbox" id="pv-en"${p.enabled ? ' checked' : ''}> Use this provider in routes</label></div>
-    </div>
+    <label class="f"><span>API key</span><input id="pv-key" type="password" autocomplete="new-password" placeholder="${h(p.has_api_key ? p.api_key || '••••' : 'Paste your key')}">
+      <small>${p.has_api_key ? 'Leave blank to keep the current key.' : 'Not needed for local servers.'}</small></label>
     <h4>Models</h4>
-    <div class="chips" id="pv-chips"></div>
-    <div class="row" style="margin-bottom:8px"><input id="pv-madd" class="mono" placeholder="Add model id and press Enter" spellcheck="false"><button class="btn" id="pv-maddb">Add</button>
-      <button class="btn" id="pv-fetch" ${isNew ? 'disabled' : ''}>Fetch from provider</button></div>
-    ${isNew ? '<p class="muted small" style="margin-top:0">Save the provider first to fetch models or test it.</p>' : ''}
-    <div id="pv-fetchbox"></div>
-    <h4>Extra headers</h4>
-    <div id="pv-hdrs">${Object.entries(p.headers || {}).map(([k, val]) => hdrRow(k, val)).join('')}</div>
-    <button class="btn sm" id="pv-hadd">+ Header</button>
-    ${isNew ? '' : `<h4>Test</h4>
-    <div class="row"><select id="pv-tmodel"></select><button class="btn" id="pv-test">Test</button></div>
-    <small class="muted">Sends a tiny request using the saved settings.</small>
-    <div id="pv-tout"></div>`}`,
+    <div class="row" style="margin-bottom:6px"><button class="btn" id="pv-load" type="button">↻ Load models</button><span class="stline" id="pv-st"></span></div>
+    <div class="fetchbox" id="pv-mbox">
+      <div class="row"><input id="pv-q" type="search" placeholder="Search models" spellcheck="false" autocomplete="off">
+        <button class="btn sm" id="pv-all" type="button">Select all</button><button class="btn sm" id="pv-none" type="button">None</button></div>
+      <div class="mlist" id="pv-list"></div>
+      <div class="small muted" id="pv-count"></div>
+    </div>
+    <details class="adv" id="pv-manual"><summary>Add model manually</summary>
+      <div class="row"><input id="pv-madd" class="mono" placeholder="model id" spellcheck="false"><button class="btn" id="pv-maddb" type="button">Add</button></div>
+      <small class="muted">Only if the list above does not load.</small>
+    </details>
+    <details class="adv"${advOpen ? ' open' : ''}><summary>Advanced</summary>
+      <div class="grid2">
+        <label class="f" id="pv-mtfw"><span>Max tokens field</span><select id="pv-mtf">
+          <option value=""${!p.max_tokens_field ? ' selected' : ''}>Default</option>
+          <option value="max_tokens"${p.max_tokens_field === 'max_tokens' ? ' selected' : ''}>max_tokens</option>
+          <option value="max_completion_tokens"${p.max_tokens_field === 'max_completion_tokens' ? ' selected' : ''}>max_completion_tokens</option>
+        </select><small>Newer OpenAI models need max_completion_tokens.</small></label>
+        <label class="f"><span>API key env var</span><input id="pv-env" class="mono" value="${h(p.api_key_env)}" placeholder="OPENAI_API_KEY" spellcheck="false"><small>Optional. Read the key from this environment variable.</small></label>
+      </div>
+      <div class="f"><span>Extra headers</span>
+        <div id="pv-hdrs">${Object.entries(p.headers || {}).map(([k, val]) => hdrRow(k, val)).join('')}</div>
+        <div><button class="btn sm" id="pv-hadd" type="button">+ Header</button></div></div>
+    </details>
+    <label class="check" style="margin-bottom:8px"><input type="checkbox" id="pv-en"${p.enabled ? ' checked' : ''}> Enabled (show in “Runs on” lists)</label>
+    ${isNew ? '' : '<h4>Test</h4><div id="pv-test"></div>'}`,
     foot: `${isNew ? '' : '<button class="btn danger" id="pv-del">Delete</button>'}<div class="grow"></div>
       <button class="btn" data-close>Cancel</button><button class="btn primary" id="pv-save">Save</button>`
   });
-  const typeSel = $('#pv-type', m), urlIn = $('#pv-url', m);
+  const typeSel = $('#pv-type', m), urlIn = $('#pv-url', m), keyIn = $('#pv-key', m), envIn = $('#pv-env', m), nameIn = $('#pv-name', m);
+  const hdrs = $('#pv-hdrs', m), st = $('#pv-st', m), q = $('#pv-q', m);
+  const readHeaders = () => { const o = {}; $$('.hrow', hdrs).forEach(r => { const k = $('.hk', r).value.trim(); if (k) o[k] = $('.hv', r).value; }); return o; };
+  const curId = () => (isNew ? slugId(nameIn.value) : p.id);
+  if (isNew) nameIn.oninput = () => ($('#pv-id', m).textContent = curId());
   const syncType = () => {
     const oa = typeSel.value === 'openai';
-    $('#pv-mtfw', m).style.visibility = oa ? '' : 'hidden';
+    $('#pv-mtfw', m).style.display = oa ? '' : 'none';
+    $('#pv-typehint', m).textContent = oa ? 'Most services (OpenAI, OpenRouter, Ollama, OpenCode…). Requests are translated.' : 'Speaks the Claude API. Requests are sent as they are.';
     const base = (urlIn.value.trim() || '{base_url}').replace(/\/+$/, '');
     $('#pv-urlhint', m).textContent = 'Requests go to ' + base + (oa ? '/chat/completions' : '/v1/messages');
   };
-  typeSel.onchange = syncType; urlIn.oninput = syncType; syncType();
-  const paintChips = () => {
-    $('#pv-chips', m).innerHTML = models.length
-      ? models.map((x, i) => `<span class="chip">${h(x)}<button data-i="${i}" title="Remove">×</button></span>`).join('')
-      : '<span class="muted small">No models yet. Routes can still use any model id.</span>';
-    const ts = $('#pv-tmodel', m);
-    if (ts) { const cur = ts.value; ts.innerHTML = models.map(x => `<option${x === cur ? ' selected' : ''}>${h(x)}</option>`).join('') || '<option value="">(no models)</option>'; }
+  syncType();
+  const setStatus = (txt, kind) => {
+    txt = String(txt || '');
+    st.textContent = txt.length > 300 ? txt.slice(0, 300) + '…' : txt;
+    st.title = txt.length > 300 ? txt : '';
+    st.className = 'stline' + (kind ? ' ' + kind : '');
   };
-  $('#pv-chips', m).onclick = e => {
-    const b = e.target.closest('button[data-i]');
-    if (b) { models.splice(Number(b.dataset.i), 1); paintChips(); }
+  const paintList = () => {
+    const qq = q.value.trim().toLowerCase();
+    const box = $('#pv-list', m);
+    $('#pv-mbox', m).style.display = all.length ? '' : 'none';
+    box.innerHTML = all.filter(x => !qq || x.toLowerCase().includes(qq)).map(x =>
+      `<label><input type="checkbox" value="${h(x)}"${picked.has(x) ? ' checked' : ''}>${h(x)}${manual.has(x) ? ' <span class="tag">(manual)</span>' : live && !live.has(x) ? ' <span class="tag">(not in live list)</span>' : ''}</label>`).join('') || '<span class="muted small">No match.</span>';
+    $('#pv-count', m).textContent = `${all.filter(x => picked.has(x)).length} of ${all.length} selected`;
+    if (!isNew) mountTest($('#pv-test', m), p, all.filter(x => picked.has(x)));
   };
-  const addModel = () => {
+  $('#pv-list', m).onchange = e => {
+    const c = e.target; if (!c.matches('input[type=checkbox]')) return;
+    touched = true;
+    if (c.checked) picked.add(c.value); else picked.delete(c.value);
+    paintList();
+  };
+  q.oninput = paintList;
+  const visible = () => $$('#pv-list input', m).map(c => c.value);
+  $('#pv-all', m).onclick = () => { touched = true; visible().forEach(x => picked.add(x)); paintList(); };
+  $('#pv-none', m).onclick = () => { touched = true; visible().forEach(x => picked.delete(x)); paintList(); };
+  const addManual = () => {
     const inp = $('#pv-madd', m);
-    inp.value.split(/[\s,]+/).map(s => s.trim()).filter(Boolean).forEach(x => { if (!models.includes(x)) models.push(x); });
-    inp.value = ''; paintChips();
+    inp.value.split(/[\s,]+/).map(s => s.trim()).filter(Boolean).forEach(x => { if (!all.includes(x)) { all.push(x); manual.add(x); } picked.add(x); });
+    inp.value = ''; paintList();
   };
-  $('#pv-maddb', m).onclick = addModel;
-  $('#pv-madd', m).onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addModel(); } };
-  paintChips();
-  $('#pv-fetch', m).onclick = e => run(async () => {
-    const r = await api('POST', `/api/providers/${enc(p.id)}/models`);
-    const list = Array.from(new Set((r && r.models) || [])).sort();
-    const box = $('#pv-fetchbox', m);
-    if (!list.length) { box.innerHTML = '<p class="muted small">Provider returned no models.</p>'; return; }
-    box.innerHTML = `<div class="fetchbox"><div class="row"><input id="fb-filter" placeholder="Filter ${list.length} models" spellcheck="false">
-      <button class="btn sm" id="fb-all">Select all</button><button class="btn sm" id="fb-none">None</button></div>
-      <div class="fetchlist">${list.map(x => `<label><input type="checkbox" value="${h(x)}"${models.includes(x) ? ' checked disabled' : ''}>${h(x)}</label>`).join('')}</div>
-      <div class="row"><button class="btn primary sm" id="fb-add">Add selected</button><button class="btn sm" id="fb-addall">Add all</button><button class="btn sm ghost" id="fb-close">Close</button>
-      <span class="muted small">Then click Save.</span></div></div>`;
-    const visible = () => $$('.fetchlist label', box).filter(l => l.style.display !== 'none').map(l => $('input', l));
-    $('#fb-filter', box).oninput = ev => {
-      const q = ev.target.value.toLowerCase();
-      $$('.fetchlist label', box).forEach(l => (l.style.display = l.textContent.toLowerCase().includes(q) ? '' : 'none'));
-    };
-    $('#fb-all', box).onclick = () => visible().forEach(c => (c.checked = true));
-    $('#fb-none', box).onclick = () => visible().forEach(c => { if (!c.disabled) c.checked = false; });
-    const merge = arr => { let n = 0; arr.forEach(x => { if (!models.includes(x)) { models.push(x); n++; } }); paintChips(); box.innerHTML = ''; toast(n + ' models added. Save to keep them.'); };
-    $('#fb-add', box).onclick = () => merge($$('.fetchlist input:checked', box).map(c => c.value));
-    $('#fb-addall', box).onclick = () => merge(list);
-    $('#fb-close', box).onclick = () => (box.innerHTML = '');
-  }, e.target);
-  const hdrs = $('#pv-hdrs', m);
+  $('#pv-maddb', m).onclick = addManual;
+  $('#pv-madd', m).onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addManual(); } };
+  paintList();
+  // Live model discovery (does not save anything).
+  let seq = 0, timer = null;
+  const discover = async () => {
+    clearTimeout(timer);
+    const base = urlIn.value.trim();
+    if (!base) { setStatus('Enter the base URL first.', 'err'); return; }
+    const my = ++seq;
+    setStatus('Loading models…');
+    const btn = $('#pv-load', m); btn.disabled = true;
+    try {
+      const body = { type: typeSel.value, base_url: base, api_key: keyIn.value.trim(), api_key_env: envIn.value.trim(), headers: readHeaders() };
+      if (!isNew) body.id = p.id;
+      const r = await api('POST', '/api/discover', body);
+      if (my !== seq || !m.isConnected) return;
+      const found = Array.from(new Set((r && r.models) || [])).sort((a, b) => a.localeCompare(b));
+      if (!found.length) { setStatus('The provider returned no models. Add one manually below.', 'err'); $('#pv-manual', m).open = true; return; }
+      const keep = all.filter(x => manual.has(x) || (!isNew && picked.has(x) && !found.includes(x)));
+      if (isNew && !touched) { picked.clear(); found.forEach(x => picked.add(x)); manual.forEach(x => picked.add(x)); }
+      all = found.concat(keep.filter(x => !found.includes(x)));
+      live = new Set(found);
+      for (const x of Array.from(picked)) if (!all.includes(x)) picked.delete(x);
+      const fresh = isNew ? 0 : found.filter(x => !(p.models || []).includes(x)).length;
+      setStatus(`${found.length} models found` + (fresh ? ` · ${fresh} new (unchecked)` : ''), 'ok');
+      paintList();
+    } catch (err) {
+      if (my !== seq || !m.isConnected) return;
+      setStatus(err.message || String(err), 'err');
+      $('#pv-manual', m).open = true;
+    } finally { if (my === seq) btn.disabled = false; }
+  };
+  const soon = () => {
+    clearTimeout(timer);
+    if (!urlIn.value.trim()) return;
+    if (!keyIn.value.trim() && !envIn.value.trim() && !p.has_api_key) return;
+    timer = setTimeout(discover, 600);
+  };
+  $('#pv-load', m).onclick = discover;
+  urlIn.oninput = () => { syncType(); soon(); };
+  typeSel.onchange = () => { syncType(); soon(); };
+  keyIn.oninput = soon; envIn.oninput = soon;
   hdrs.onclick = e => { const b = e.target.closest('[data-rm]'); if (b) b.parentElement.remove(); };
   $('#pv-hadd', m).onclick = () => { hdrs.insertAdjacentHTML('beforeend', hdrRow('', '')); $$('.hk', hdrs).pop().focus(); };
-  const testBtn = $('#pv-test', m);
-  if (testBtn) testBtn.onclick = e => run(async () => {
-    const out = $('#pv-tout', m);
-    out.innerHTML = '<p class="muted small">Testing…</p>';
-    try {
-      const r = await api('POST', `/api/providers/${enc(p.id)}/test`, { model: $('#pv-tmodel', m).value });
-      out.innerHTML = r && r.ok
-        ? `<p><span class="badge ok">OK</span> <span class="muted small">${h(fmtNum(r.latency_ms))} ms</span></p>${r.reply ? `<pre class="reply">${h(r.reply)}</pre>` : ''}`
-        : `<p><span class="badge err">Failed</span>${r && r.latency_ms ? ` <span class="muted small">${h(fmtNum(r.latency_ms))} ms</span>` : ''}</p><pre class="reply">${h((r && r.error) || 'Unknown error')}</pre>`;
-    } catch (err) { out.innerHTML = `<pre class="reply" style="color:var(--err)">${h(err.message)}</pre>`; }
-  }, e.target);
+  if (!isNew && p.base_url) discover();
+  else if (isNew && p.base_url) setStatus('Paste your key, the model list loads by itself.');
   $('#pv-save', m).onclick = e => run(async () => {
-    const id = isNew ? $('#pv-id', m).value.trim() : p.id;
-    if (!/^[a-z0-9_-]+$/.test(id)) throw new Error('ID must be lowercase letters, digits, _ or -');
-    if (isNew && state.providers.some(x => x.id === id)) throw new Error('A provider with this ID already exists');
+    const name = nameIn.value.trim();
+    if (!name) throw new Error('Please enter a name');
+    const id = curId();
     const base = urlIn.value.trim();
     if (!base) throw new Error('Base URL is required');
-    const headers = {};
-    $$('.hrow', hdrs).forEach(r => { const k = $('.hk', r).value.trim(); if (k) headers[k] = $('.hv', r).value; });
-    const key = $('#pv-key', m).value.trim();
+    const models = all.filter(x => picked.has(x));
+    if (all.length && !models.length) throw new Error('Pick at least one model');
+    const key = keyIn.value.trim();
     const body = Object.assign({}, p, {
-      id, name: $('#pv-name', m).value.trim() || id, type: typeSel.value, base_url: base,
-      api_key: key || (isNew ? '' : p.api_key || ''), api_key_env: $('#pv-env', m).value.trim(),
-      headers, models: models.slice(), max_tokens_field: typeSel.value === 'openai' ? $('#pv-mtf', m).value : '',
+      id, name, type: typeSel.value, base_url: base,
+      api_key: key || (isNew ? '' : p.api_key || ''), api_key_env: envIn.value.trim(),
+      headers: readHeaders(), models, max_tokens_field: typeSel.value === 'openai' ? $('#pv-mtf', m).value : '',
       enabled: $('#pv-en', m).checked
     });
     delete body.has_api_key;
-    const saved = await api('PUT', '/api/providers/' + enc(id), body);
+    const saved = await api('PUT', '/api/providers/' + enc(id) + (isNew ? '?create=1' : ''), body);
     await loadProviders();
+    closeModal();
+    const n = ((saved && saved.models) || models).length;
+    toast(`Provider saved · ${n} models`, 'ok');
     if (curTab() === 'providers') await views.providers($('#view'), () => true);
-    if (isNew) {
-      toast('Provider saved. You can now fetch models and test it.', 'ok');
-      openProviderEditor(saved || state.providers.find(x => x.id === id) || body, false);
-    } else { closeModal(); toast('Provider saved', 'ok'); }
   }, e.target);
   const del = $('#pv-del', m);
   if (del) del.onclick = e => run(async () => {
@@ -827,25 +1065,26 @@ function openProviderEditor(orig, isNew) {
 
 /* ---------- rules ---------- */
 let rulesDraft = [];
+const CUSTOM = '__custom__';
 views.rules = async (v, alive) => {
-  await Promise.all([loadProviders(), loadRules()]);
+  await Promise.all([loadProviders(), loadRules(), loadMeta()]);
   if (!alive()) return;
   rulesDraft = clone(state.rules) || [];
   v.innerHTML = `<div class="bar"><h2>Rules</h2><div class="grow"></div>
     <button class="btn" id="addRule">+ Add rule</button><button class="btn primary" id="saveRules">Save all</button></div>
-    <p class="hint">Requests that are not from a routed agent are matched by model name. First match wins. No match = Anthropic.
-      Patterns are globs, e.g. <code>claude-haiku-*</code> or <code>*</code>.</p>
+    <p class="hint">For requests that are not from a routed agent. Pick which requests, then where they run. First match wins. No match = your subscription.</p>
     <div id="rulelist"></div>`;
   paintRules();
   $('#addRule').onclick = () => {
     syncRules();
-    rulesDraft.push({ match: '', enabled: true, note: '', route: Object.assign({}, ROUTE_DEFAULT) });
+    const pats = state.meta.rule_patterns;
+    rulesDraft.push({ match: pats.length ? pats[0].match : '', enabled: true, note: '', route: Object.assign({}, ROUTE_DEFAULT) });
     paintRules();
-    const ins = $$('#rulelist .r-match'); if (ins.length) ins[ins.length - 1].focus();
+    const sels = $$('#rulelist .r-msel'); if (sels.length) sels[sels.length - 1].focus();
   };
   $('#saveRules').onclick = e => run(async () => {
     syncRules();
-    rulesDraft.forEach((r, i) => { if (!r.match) throw new Error(`Rule #${i + 1} needs a match pattern`); });
+    rulesDraft.forEach((r, i) => { if (!r.match) throw new Error(`Rule #${i + 1} needs a pattern`); });
     state.rules = (await api('PUT', '/api/rules', rulesDraft)) || rulesDraft;
     rulesDraft = clone(state.rules);
     paintRules();
@@ -856,7 +1095,8 @@ function syncRules() {
   $$('#rulelist .rule').forEach(card => {
     const r = rulesDraft[Number(card.dataset.i)];
     if (!r) return;
-    r.match = $('.r-match', card).value.trim();
+    const sv = $('.r-msel', card).value;
+    r.match = sv === CUSTOM ? $('.r-match', card).value.trim() : sv;
     r.enabled = $('.r-en', card).checked;
     r.note = $('.r-note', card).value;
     r.route = $('.r-route', card)._get();
@@ -864,17 +1104,32 @@ function syncRules() {
 }
 function paintRules() {
   const box = $('#rulelist'); if (!box) return;
-  if (!rulesDraft.length) { box.innerHTML = '<div class="empty">No rules. Everything not from a routed agent goes to Anthropic.</div>'; return; }
-  box.innerHTML = rulesDraft.map((r, i) => `<div class="card rule" data-i="${i}">
+  if (!rulesDraft.length) { box.innerHTML = '<div class="empty">No rules: everything not from a routed agent uses your subscription.</div>'; return; }
+  const pats = (state.meta || META_DEFAULT).rule_patterns;
+  box.innerHTML = rulesDraft.map((r, i) => {
+    const known = pats.some(p => p.match === r.match);
+    return `<div class="card rule" data-i="${i}">
     <div class="rule-head"><span class="num">#${i + 1}</span>
-      <input class="r-match mono" value="${h(r.match)}" placeholder="claude-haiku-*" spellcheck="false">
-      <label class="check"><input type="checkbox" class="r-en"${r.enabled ? ' checked' : ''}> Enabled</label>
+      <label class="switch" title="Enabled"><input type="checkbox" class="r-en"${r.enabled ? ' checked' : ''}><span></span></label>
+      <select class="r-msel r-match-sel" style="flex:1;min-width:170px">${pats.map(p => `<option value="${h(p.match)}"${p.match === r.match ? ' selected' : ''}>${h(p.label)}</option>`).join('')}
+        <option value="${h(CUSTOM)}"${known ? '' : ' selected'}>Custom pattern…</option></select>
       <button class="btn icon" data-act="up" title="Move up"${i === 0 ? ' disabled' : ''}>↑</button>
       <button class="btn icon" data-act="down" title="Move down"${i === rulesDraft.length - 1 ? ' disabled' : ''}>↓</button>
       <button class="btn icon danger" data-act="del" title="Delete">✕</button></div>
+    <label class="f r-cw"${known ? ' style="display:none"' : ''}><input class="r-match mono" value="${h(known ? '' : r.match)}" placeholder="claude-*-latest" spellcheck="false">
+      <small>Glob on the requested model name. <code>*</code> = anything.</small></label>
     <label class="f"><input class="r-note" value="${h(r.note)}" placeholder="Note (optional)"></label>
-    <div class="r-route"></div></div>`).join('');
-  $$('.rule', box).forEach(card => mountRoute($('.r-route', card), rulesDraft[Number(card.dataset.i)].route));
+    <div class="r-route"></div></div>`;
+  }).join('');
+  $$('.rule', box).forEach(card => {
+    mountRoute($('.r-route', card), rulesDraft[Number(card.dataset.i)].route);
+    const sel = $('.r-msel', card);
+    sel.onchange = () => {
+      const c = sel.value === CUSTOM;
+      $('.r-cw', card).style.display = c ? '' : 'none';
+      if (c) $('.r-match', card).focus();
+    };
+  });
   box.onclick = e => {
     const b = e.target.closest('button[data-act]'); if (!b) return;
     const i = Number(b.closest('.rule').dataset.i);
@@ -970,7 +1225,7 @@ $('#reloadBtn').onclick = e => run(async () => {
 }, e.currentTarget);
 
 loadStatus().catch(() => {});
-render();
+Promise.all([loadMeta(), loadProviders(), loadAgents()]).catch(() => {}).finally(render);
 </script>
 </body>
 </html>

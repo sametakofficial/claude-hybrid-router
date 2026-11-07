@@ -115,3 +115,39 @@ func TestAgentLifecycle(t *testing.T) {
 		t.Fatalf("path traversal must be rejected, got %d", code)
 	}
 }
+
+func TestDiscoverAndCreate(t *testing.T) {
+	models := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer k-123456789012" {
+			w.WriteHeader(401)
+			return
+		}
+		io.WriteString(w, `{"data":[{"id":"m1"},{"id":"m2"},{"id":"m1"}]}`)
+	}))
+	defer models.Close()
+	p, h, _ := setup(t)
+	code, out := do(h, "POST", "/api/discover", `{"type":"openai","base_url":"`+models.URL+`/v1","api_key":"k-123456789012"}`, nil)
+	if code != 200 || out != `{"models":["m1","m2"]}`+"\n" {
+		t.Fatalf("%d %s", code, out)
+	}
+	// empty models on create -> auto-discovered
+	code, out = do(h, "PUT", "/api/providers/new?create=1", `{"name":"New","type":"openai","base_url":"`+models.URL+`/v1","api_key":"k-123456789012","enabled":true}`, nil)
+	if code != 200 || !strings.Contains(out, `"models":["m1","m2"]`) {
+		t.Fatalf("%d %s", code, out)
+	}
+	if code, _ := do(h, "PUT", "/api/providers/new?create=1", `{"name":"New","type":"openai","base_url":"`+models.URL+`/v1","enabled":true}`, nil); code != 400 {
+		t.Fatalf("duplicate create should fail, got %d", code)
+	}
+	// discover with masked key uses the stored one
+	if code, out := do(h, "POST", "/api/discover", `{"id":"new","type":"openai","base_url":"`+models.URL+`/v1","api_key":"k-1…9012"}`, nil); code != 200 {
+		t.Fatalf("masked key discover: %d %s", code, out)
+	}
+	code, out = do(h, "POST", "/api/providers/new/refresh", "", nil)
+	if code != 200 || !strings.Contains(out, "m2") {
+		t.Fatalf("refresh %d %s", code, out)
+	}
+	_ = p
+	if code, out := do(h, "GET", "/api/meta", "", nil); code != 200 || !strings.Contains(out, "agent_templates") {
+		t.Fatalf("meta %d", code)
+	}
+}

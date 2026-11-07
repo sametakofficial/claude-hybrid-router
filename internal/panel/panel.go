@@ -56,7 +56,14 @@ type handlerFunc func(r *http.Request) (any, error)
 func (p *Panel) Handler() http.Handler {
 	mux := http.NewServeMux()
 	page, _ := webFS.ReadFile("web/index.html")
+	devDir := os.Getenv("CLAUDE_HYBRID_WEB_DIR") // serve the UI from disk while editing it
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		page := page
+		if devDir != "" {
+			if b, err := os.ReadFile(filepath.Join(devDir, "index.html")); err == nil {
+				page = b
+			}
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -71,6 +78,9 @@ func (p *Panel) Handler() http.Handler {
 	route("DELETE /api/providers/{id}", p.deleteProvider)
 	route("POST /api/providers/{id}/models", p.fetchModels)
 	route("POST /api/providers/{id}/test", p.testProvider)
+	route("POST /api/providers/{id}/refresh", p.refreshModels)
+	route("POST /api/discover", p.discoverModels)
+	route("GET /api/meta", func(*http.Request) (any, error) { return meta, nil })
 	route("GET /api/agents", p.listAgents)
 	route("PUT /api/agents/{name}", p.putAgent)
 	route("DELETE /api/agents/{name}", p.deleteAgent)
@@ -270,9 +280,22 @@ func (p *Panel) putProvider(r *http.Request) (any, error) {
 	if len(in.Headers) == 0 {
 		in.Headers = nil
 	}
+	create := r.URL.Query().Get("create") == "1"
+	if len(in.Models) == 0 {
+		probe := in
+		if old, ok := p.Store.Get().Provider(id); ok && !create {
+			probe.APIKey = keepKey(in.APIKey, old.APIKey)
+		}
+		if models, err := discover(r.Context(), probe); err == nil {
+			in.Models = models
+		}
+	}
 	cfg, err := p.Store.Update(func(c *config.Config) error {
 		for i, old := range c.Providers {
 			if old.ID == id {
+				if create {
+					return bad("a provider with id %q already exists", id)
+				}
 				in.APIKey = keepKey(in.APIKey, old.APIKey)
 				c.Providers[i] = in
 				return nil
@@ -331,13 +354,74 @@ func (p *Panel) fetchModels(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	models, err := discover(r.Context(), pr)
+	if err != nil {
+		return nil, bad("%v", err)
+	}
+	return map[string]any{"models": models}, nil
+}
+
+// discoverModels fetches a model list for a provider that may not be saved
+// yet. A blank or masked key falls back to the stored provider's key.
+func (p *Panel) discoverModels(r *http.Request) (any, error) {
+	var in config.Provider
+	if err := decode(r, &in); err != nil {
+		return nil, err
+	}
+	in.BaseURL = strings.TrimRight(strings.TrimSpace(in.BaseURL), "/")
+	if !strings.HasPrefix(in.BaseURL, "http://") && !strings.HasPrefix(in.BaseURL, "https://") {
+		return nil, bad("base URL must start with http:// or https://")
+	}
+	if old, ok := p.Store.Get().Provider(in.ID); ok && in.ID != "" {
+		in.APIKey = keepKey(in.APIKey, old.APIKey)
+	} else if in.APIKey == maskedToken {
+		in.APIKey = ""
+	}
+	models, err := discover(r.Context(), in)
+	if err != nil {
+		return nil, bad("%v", err)
+	}
+	return map[string]any{"models": models}, nil
+}
+
+// refreshModels replaces a saved provider's models with the live list.
+func (p *Panel) refreshModels(r *http.Request) (any, error) {
+	id := r.PathValue("id")
+	pr, err := p.provider(id)
+	if err != nil {
+		return nil, err
+	}
+	models, err := discover(r.Context(), pr)
+	if err != nil {
+		return nil, bad("%v", err)
+	}
+	cfg, err := p.Store.Update(func(c *config.Config) error {
+		for i := range c.Providers {
+			if c.Providers[i].ID == id {
+				c.Providers[i].Models = models
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	saved, _ := cfg.Provider(id)
+	return viewProvider(saved), nil
+}
+
+// discover calls the provider's /models endpoint.
+func discover(ctx context.Context, pr config.Provider) ([]string, error) {
 	base := strings.TrimRight(pr.BaseURL, "/")
 	if pr.Type == config.TypeAnthropic {
 		base = strings.TrimSuffix(base, "/v1") + "/v1"
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/models", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
 	if key := pr.Key(); key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("x-api-key", key)
@@ -348,12 +432,12 @@ func (p *Panel) fetchModels(r *http.Request) (any, error) {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, bad("fetch models: %v", err)
+		return nil, fmt.Errorf("fetch models: %v", err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, bad("fetch models: HTTP %d: %.300s", resp.StatusCode, string(data))
+		return nil, fmt.Errorf("fetch models: HTTP %d: %.300s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	var list struct {
 		Data []struct {
@@ -364,16 +448,23 @@ func (p *Panel) fetchModels(r *http.Request) (any, error) {
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &list); err != nil {
-		return nil, bad("fetch models: unexpected reply: %.200s", string(data))
+		return nil, fmt.Errorf("fetch models: unexpected reply: %.200s", string(data))
 	}
+	seen := map[string]bool{}
 	models := []string{}
+	add := func(m string) {
+		if m != "" && !seen[m] {
+			seen[m] = true
+			models = append(models, m)
+		}
+	}
 	for _, m := range list.Data {
-		models = append(models, m.ID)
+		add(m.ID)
 	}
 	for _, m := range list.Models {
-		models = append(models, m.Name)
+		add(m.Name)
 	}
-	return map[string]any{"models": models}, nil
+	return models, nil
 }
 
 func (p *Panel) testProvider(r *http.Request) (any, error) {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.0
+
+- Panel: everything is picked from lists. Provider models load automatically
+  from /models (searchable checklist), one "Runs on" picker for agents and
+  rules, agent templates, tool checkboxes, color swatches, inline route
+  switch on agent cards, rule pattern presets.
+- API: /api/meta, /api/discover, /api/providers/{id}/refresh, PUT ?create=1.
+- Anthropic 429s are logged with their rate-limit headers.
+
 ## 2.0.0
 
 Rewrite.
