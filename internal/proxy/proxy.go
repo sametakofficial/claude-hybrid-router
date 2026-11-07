@@ -1,930 +1,480 @@
-// Package proxy implements the MITM CONNECT proxy with local model routing.
+// Package proxy is the HTTP server Claude Code talks to (via
+// ANTHROPIC_BASE_URL). It passes normal traffic to Anthropic and routes
+// marked subagents and matching models to other providers.
 package proxy
 
 import (
-	"bufio"
-	"crypto/tls"
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/peter-wagstaff/claude-hybrid-router/internal/config"
-	"github.com/peter-wagstaff/claude-hybrid-router/internal/mitm"
+	"github.com/sametakofficial/claude-hybrid-router/internal/config"
+	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
+	"github.com/sametakofficial/claude-hybrid-router/internal/translate"
 )
 
-// Proxy is an HTTP handler that handles CONNECT requests with MITM TLS.
+const (
+	maxBody    = 64 << 20
+	maxRetries = 2
+	// HealthPath answers on the proxy port so the launcher can tell it is ours.
+	HealthPath = "/_claude-hybrid/health"
+)
+
+// Proxy implements http.Handler.
 type Proxy struct {
-	certCache     *mitm.CertCache
-	httpClient    *http.Client
-	localClient   *http.Client
-	routeResolver *config.RouteResolver
-	sem           chan struct{}
-	verbose       bool
+	cfg    func() *config.Config
+	rec    *stats.Recorder
+	client *http.Client // for providers
+	up     *httputil.ReverseProxy
 }
 
-// Option configures a Proxy.
-type Option func(*Proxy)
-
-// WithVerbose enables verbose logging.
-func WithVerbose(v bool) Option {
-	return func(p *Proxy) { p.verbose = v }
-}
-
-// WithHTTPClient sets a custom HTTP client for upstream requests.
-func WithHTTPClient(c *http.Client) Option {
-	return func(p *Proxy) { p.httpClient = c }
-}
-
-// WithRouteResolver sets the route resolver for local routing.
-func WithRouteResolver(r *config.RouteResolver) Option {
-	return func(p *Proxy) { p.routeResolver = r }
-}
-
-// New creates a new Proxy.
-func New(cache *mitm.CertCache, opts ...Option) *Proxy {
-	p := &Proxy{
-		certCache: cache,
-		sem:       make(chan struct{}, config.MaxProxyGoroutines),
+// New builds a proxy. cfg must return the live config (treated read-only).
+func New(cfg func() *config.Config, rec *stats.Recorder) *Proxy {
+	timeout := time.Duration(cfg().Server.HeaderTimeout) * time.Second
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConnsPerHost:   16,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: timeout,
 	}
-	for _, o := range opts {
-		o(p)
-	}
-	if p.httpClient == nil {
-		transport := &http.Transport{
-			ForceAttemptHTTP2:     true,
-			TLSClientConfig:       &tls.Config{},
-			ResponseHeaderTimeout: config.UpstreamTimeout,
-		}
-		p.httpClient = &http.Client{
-			Transport: transport,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-			// No http.Client.Timeout — it covers the entire response including
-			// body reads, which kills long-running streaming responses from
-			// Anthropic's API. ResponseHeaderTimeout on the Transport handles
-			// the "server not responding" case without cutting off streams.
-		}
-	}
-	if p.localClient == nil {
-		egressTimeout := config.UpstreamTimeout
-		if p.routeResolver != nil {
-			egressTimeout = p.routeResolver.Timeout()
-		}
-		p.localClient = &http.Client{
-			Transport: &http.Transport{
-				ResponseHeaderTimeout: egressTimeout,
-			},
-		}
+	p := &Proxy{cfg: cfg, rec: rec, client: &http.Client{Transport: transport}}
+	p.up = &httputil.ReverseProxy{
+		Transport:     transport,
+		FlushInterval: -1, // flush every write: SSE must not be buffered
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			u, err := url.Parse(p.cfg().Server.Upstream)
+			if err != nil {
+				u, _ = url.Parse("https://api.anthropic.com")
+			}
+			pr.SetURL(u)
+			pr.Out.Host = u.Host
+			// Let Go's transport handle compression so responses are plain
+			// text here and token usage can be read for the stats.
+			pr.Out.Header.Del("Accept-Encoding")
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			log.Printf("upstream error %s %s: %v", r.Method, r.URL.Path, err)
+			writeError(w, http.StatusBadGateway, "api_error", "claude-hybrid: Anthropic upstream unreachable: "+err.Error())
+		},
 	}
 	return p
 }
 
-// ServeHTTP handles both CONNECT (MITM) and direct HTTP requests (reverse proxy).
-//
-// Reverse proxy mode: when Claude Code is launched with ANTHROPIC_BASE_URL
-// pointing at this proxy, it sends plain HTTP requests instead of CONNECT
-// tunnels. This path reads the body, checks for the routing marker, and
-// either forwards to the local provider or proxies upstream to Anthropic.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodConnect {
-		p.handleReverseProxy(w, r)
+	if r.URL.Path == HealthPath {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"status":"ok","app":"claude-hybrid"}`)
+		return
+	}
+	isMessages := r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/messages")
+	if !isMessages {
+		p.up.ServeHTTP(w, r)
 		return
 	}
 
-	host, port, err := net.SplitHostPort(r.Host)
-	if err != nil {
-		http.Error(w, "bad CONNECT target", http.StatusBadRequest)
-		return
-	}
-
-	// Acquire semaphore (non-blocking)
-	select {
-	case p.sem <- struct{}{}:
-	default:
-		http.Error(w, "proxy overloaded", http.StatusServiceUnavailable)
-		return
-	}
-	defer func() { <-p.sem }()
-
-	// Hijack the connection
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "hijack not supported", http.StatusInternalServerError)
-		return
-	}
-	conn, _, err := hj.Hijack()
-	if err != nil {
-		p.logVerbose("hijack error: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	if shouldBypassMITM(host) {
-		if err := p.tunnelDirect(conn, net.JoinHostPort(host, port)); err != nil {
-			p.logVerbose("direct tunnel failed for %s: %v", host, err)
-		}
-		return
-	}
-
-	// Send 200 Connection Established
-	conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-
-	// MITM TLS handshake
-	tlsCfg, err := p.certCache.GetTLSConfig(host)
-	if err != nil {
-		p.logVerbose("cert generation failed for %s: %v", host, err)
-		return
-	}
-	tlsConn := tls.Server(conn, tlsCfg)
-	if err := tlsConn.Handshake(); err != nil {
-		p.logVerbose("MITM TLS handshake failed for %s: %v", host, err)
-		return
-	}
-	defer tlsConn.Close()
-
-	p.handleTunnel(tlsConn, host, port)
-}
-
-var bypassHosts = map[string]bool{
-	"pypi.org": true, "files.pythonhosted.org": true,
-	"registry.npmjs.org":    true,
-	"accounts.google.com":   true,
-	"oauth2.googleapis.com": true,
-	"github.com":            true,
-	"api.github.com":        true,
-	"rubygems.org":          true,
-	"crates.io":             true,
-	"static.crates.io":      true,
-	"proxy.golang.org":      true,
-	"sum.golang.org":        true,
-}
-
-var bypassSuffixes = []string{".pythonhosted.org", ".npmjs.org"}
-
-func shouldBypassMITM(host string) bool {
-	host = strings.ToLower(host)
-	if bypassHosts[host] {
-		return true
-	}
-	for _, suffix := range bypassSuffixes {
-		if strings.HasSuffix(host, suffix) {
-			return true
-		}
-	}
-	return false
-}
-
-func (p *Proxy) tunnelDirect(client net.Conn, target string) error {
-	upstream, err := net.DialTimeout("tcp", target, config.UpstreamTimeout)
-	if err != nil {
-		sendError(client, 502, "Bad Gateway")
-		return err
-	}
-	defer upstream.Close()
-
-	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
-		return err
-	}
-
-	var wg sync.WaitGroup
-	copyConn := func(dst, src net.Conn) {
-		defer wg.Done()
-		io.Copy(dst, src)
-		if tcp, ok := dst.(*net.TCPConn); ok {
-			tcp.CloseWrite()
-		}
-	}
-
-	wg.Add(2)
-	go copyConn(upstream, client)
-	go copyConn(client, upstream)
-	wg.Wait()
-	return nil
-}
-
-func (p *Proxy) handleTunnel(tlsConn net.Conn, host, port string) {
-	tlsConn.SetDeadline(deadlineFromNow(config.ClientRecvTimeout))
-	br := bufio.NewReader(tlsConn)
-
-	for {
-		req, err := http.ReadRequest(br)
-		if err != nil {
-			return // Connection closed or read error
-		}
-
-		body, err := io.ReadAll(io.LimitReader(req.Body, config.MaxBodyBytes+1))
-		req.Body.Close()
-		if err != nil {
-			sendError(tlsConn, 400, "Bad Request")
-			return
-		}
-		if int64(len(body)) > config.MaxBodyBytes {
-			sendError(tlsConn, 413, "Content Too Large")
-			return
-		}
-
-		// Reset deadline for each request
-		tlsConn.SetDeadline(deadlineFromNow(config.ClientRecvTimeout))
-
-		route, strippedBody := detectLocalRoute(body)
-
-		// System prompt override: replace the system field before forwarding.
-		if route.Route != "" && p.routeResolver != nil && p.routeResolver.SystemPrompt() != "" &&
-			req.Method == "POST" {
-			strippedBody = rewriteSystemPrompt(strippedBody, p.routeResolver.SystemPrompt())
-		}
-
-		// Reminder injection: append <system-reminder> to messages containing tool_result.
-		if route.Route != "" && p.routeResolver != nil && p.routeResolver.Reminder() != "" &&
-			req.Method == "POST" {
-			strippedBody = injectReminder(strippedBody, p.routeResolver.Reminder())
-		}
-
-		if route.Route != "" {
-			streamMode := "non-streaming"
-			var reqMeta struct {
-				Stream bool `json:"stream"`
-			}
-			if json.Unmarshal(body, &reqMeta) == nil && reqMeta.Stream {
-				streamMode = "streaming"
-			}
-			log.Printf("LOCAL_ROUTE %s https://%s:%s%s → route=%s (%s)",
-				req.Method, host, port, req.URL.RequestURI(), route.Route, streamMode)
-
-			p.forwardLocal(tlsConn, route, strippedBody)
-		} else {
-			if !p.forwardUpstream(tlsConn, host, port, req, body) {
-				return
-			}
-		}
-
-		if req.Close {
-			return
-		}
-	}
-}
-
-// handleReverseProxy processes direct HTTP requests from Claude Code when it is
-// configured with ANTHROPIC_BASE_URL pointing at this proxy. It reads the
-// request body, checks for the routing marker, and either forwards to the
-// local provider or proxies upstream to Anthropic's real API.
-func (p *Proxy) handleReverseProxy(w http.ResponseWriter, r *http.Request) {
-	log.Printf("REVERSE_PROXY %s %s%s (Host: %s, ContentLength: %d)",
-		r.Method, r.Host, r.URL.RequestURI(), r.Header.Get("Host"), r.ContentLength)
-
-	// Only POST is relevant for API calls; handle GET/OPTIONS for health checks.
-	if r.Method == "GET" && r.URL.Path == "/health" {
-		w.WriteHeader(200)
-		w.Write([]byte(`{"status":"ok"}`))
-		return
-	}
-	if r.Method == "OPTIONS" {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "*")
-		w.WriteHeader(204)
-		return
-	}
-	if r.Method != "POST" {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Acquire semaphore
-	select {
-	case p.sem <- struct{}{}:
-	default:
-		http.Error(w, "proxy overloaded", http.StatusServiceUnavailable)
-		return
-	}
-	defer func() { <-p.sem }()
-
-	body, err := io.ReadAll(io.LimitReader(r.Body, config.MaxBodyBytes+1))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	r.Body.Close()
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "read body: "+err.Error())
 		return
 	}
-	if int64(len(body)) > config.MaxBodyBytes {
-		http.Error(w, "content too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	route, strippedBody := detectLocalRoute(body)
-	if route.Route == "" && p.verbose {
-		snippet := sanitizeForLog(string(body))
-		if len(snippet) > 2000 {
-			snippet = snippet[:2000]
-		}
-		log.Printf("NO_ROUTE_BODY %s", snippet)
-	}
-
-	// System prompt override
-	if route.Route != "" && p.routeResolver != nil && p.routeResolver.SystemPrompt() != "" {
-		strippedBody = rewriteSystemPrompt(strippedBody, p.routeResolver.SystemPrompt())
-	}
-
-	// Reminder injection
-	if route.Route != "" && p.routeResolver != nil && p.routeResolver.Reminder() != "" {
-		strippedBody = injectReminder(strippedBody, p.routeResolver.Reminder())
-	}
-
-	if route.Route != "" {
-		streamMode := "non-streaming"
-		var reqMeta struct {
-			Stream bool `json:"stream"`
-		}
-		if json.Unmarshal(body, &reqMeta) == nil && reqMeta.Stream {
-			streamMode = "streaming"
-		}
-		log.Printf("LOCAL_ROUTE %s %s%s → route=%s (%s) [reverse-proxy]",
-			r.Method, r.Host, r.URL.RequestURI(), route.Route, streamMode)
-
-		p.forwardLocalHTTP(w, route, strippedBody)
-	} else {
-		p.forwardUpstreamHTTP(w, r, body)
-	}
-}
-
-// forwardLocalHTTP sends the request to the local provider and writes the
-// response back through the http.ResponseWriter (reverse proxy mode).
-func (p *Proxy) forwardLocalHTTP(w http.ResponseWriter, route RouteDirective, body []byte) {
-	routeURL := strings.TrimRight(route.Route, "/")
-
-	if !strings.HasPrefix(routeURL, "http") {
-		log.Printf("invalid route URL: %s", routeURL)
-		http.Error(w, fmt.Sprintf("invalid route URL %q", routeURL), http.StatusBadRequest)
+	if len(body) > maxBody {
+		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body too large")
 		return
 	}
 
-	if p.routeResolver == nil {
-		isStreaming := false
-		var data map[string]interface{}
-		if json.Unmarshal(body, &data) == nil {
-			if s, ok := data["stream"].(bool); ok {
-				isStreaming = s
-			}
+	cfg := p.cfg()
+	d, req, err := decide(cfg, body)
+	countOnly := strings.HasSuffix(r.URL.Path, "/count_tokens")
+	entry := stats.Entry{Time: time.Now(), Path: r.URL.Path, Source: d.Source}
+	if req != nil {
+		entry.ReqModel, entry.Stream = req.model(), req.stream()
+	}
+	if err != nil || (d.Route.IsAnthropic() && d.LegacyURL == "") {
+		// Anthropic subscription: forward untouched (minus the marker).
+		entry.Kind = "anthropic"
+		p.passthrough(w, r, d.Body, entry, countOnly)
+		return
+	}
+
+	entry.Kind = "routed"
+	switch {
+	case d.LegacyURL != "":
+		entry.Provider = "legacy"
+		entry.Model = entry.ReqModel
+		prov := config.Provider{ID: "legacy", Type: config.TypeAnthropic, BaseURL: d.LegacyURL}
+		p.toAnthropic(w, r, prov, d.Route, req, entry, countOnly)
+	default:
+		prov, ok := cfg.Provider(d.Route.Provider)
+		entry.Provider = d.Route.Provider
+		entry.Model = d.Route.Model
+		if entry.Model == "" {
+			entry.Model = entry.ReqModel
 		}
-		// Stub mode: respond through http.ResponseWriter
-		stubText := fmt.Sprintf("[Local model '%s' request intercepted by proxy — no local provider configured yet]", routeURL)
-		w.Header().Set("Content-Type", "application/json")
-		if isStreaming {
-			w.Header().Set("Content-Type", "text/event-stream")
+		if !ok || !prov.Enabled {
+			msg := fmt.Sprintf("claude-hybrid: provider %q for %s is missing or disabled", d.Route.Provider, d.Source)
+			p.fail(w, entry, http.StatusBadRequest, msg, countOnly)
+			return
 		}
-		w.WriteHeader(200)
-		if isStreaming {
-			writeSSEStubToWriter(w, "msg_stub_local_route", routeURL, stubText)
+		applyRoute(req, d.Route)
+		if prov.Type == config.TypeAnthropic {
+			p.toAnthropic(w, r, prov, d.Route, req, entry, countOnly)
 		} else {
-			writeJSONStubToWriter(w, "msg_stub_local_route", routeURL, stubText)
+			p.toOpenAI(w, r, prov, d.Route, req, entry, countOnly)
 		}
-		return
-	}
-
-	start := time.Now()
-
-	isStreaming := false
-	var data map[string]interface{}
-	if json.Unmarshal(body, &data) == nil {
-		if s, ok := data["stream"].(bool); ok {
-			isStreaming = s
-		}
-	}
-
-	endpoint := routeURL + "/v1/messages"
-	maxAttempts := 1 + config.EgressMaxRetries
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		localReq, err := http.NewRequest("POST", endpoint, strings.NewReader(string(body)))
-		if err != nil {
-			log.Printf("failed to create egress request: %v", err)
-			http.Error(w, fmt.Sprintf("failed to create request: %v", err), http.StatusInternalServerError)
-			return
-		}
-		localReq.Header.Set("Content-Type", "application/json")
-		localReq.Header.Set("anthropic-version", "2023-06-01")
-
-		resp, err := p.localClient.Do(localReq)
-		if err != nil {
-			cat := classifyError(err)
-			log.Printf("[LOCAL_ERR:%s] egress unreachable for %s: %v (%s)", cat, routeURL, err, endpoint)
-			http.Error(w, fmt.Sprintf("[%s] Route '%s' unreachable: %v", cat, routeURL, err), http.StatusBadGateway)
-			return
-		}
-
-		if isRetryableStatus(resp.StatusCode) && attempt < maxAttempts {
-			io.ReadAll(io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
-			delay := retryDelay(attempt)
-			log.Printf("[LOCAL_RETRY:%d/%d] route %s returned %d — retrying in %v",
-				attempt, maxAttempts, routeURL, resp.StatusCode, delay)
-			time.Sleep(delay)
-			continue
-		}
-
-		// Copy response headers
-		for k, vals := range resp.Header {
-			for _, v := range vals {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-
-		if resp.StatusCode != 200 {
-			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
-			sanitized := sanitizeForLog(string(respBody))
-			log.Printf("[LOCAL_ERR:HTTP_%d] route %s returned %d: %s", resp.StatusCode, routeURL, resp.StatusCode, sanitized)
-			w.Write(respBody)
-			return
-		}
-
-		// Stream the response body
-		if _, err := io.Copy(w, resp.Body); err != nil {
-			resp.Body.Close()
-			cat := classifyError(err)
-			log.Printf("[LOCAL_ERR:%s] response write for %s: %v", cat, routeURL, err)
-			return
-		}
-		resp.Body.Close()
-
-		streamTag := ""
-		if isStreaming {
-			streamTag = "streaming, "
-		}
-		retryTag := ""
-		if attempt > 1 {
-			retryTag = fmt.Sprintf("retry %d, ", attempt-1)
-		}
-		log.Printf("LOCAL_OK %s (%s%s%dms) [reverse-proxy]", routeURL, retryTag, streamTag, time.Since(start).Milliseconds())
-		return
 	}
 }
 
-// forwardUpstreamHTTP proxies a request to the real Anthropic API (reverse proxy mode).
-func (p *Proxy) forwardUpstreamHTTP(w http.ResponseWriter, r *http.Request, body []byte) {
-	// Build the upstream URL — target is always the real Anthropic API.
-	upstreamURL := "https://api.anthropic.com" + r.URL.RequestURI()
-
-	upReq, err := http.NewRequest(r.Method, upstreamURL, strings.NewReader(string(body)))
-	if err != nil {
-		http.Error(w, "bad gateway", http.StatusBadGateway)
+// passthrough sends the request to Anthropic with the client's own headers
+// (the subscription's OAuth token stays between Claude Code and Anthropic).
+func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, body []byte, e stats.Entry, countOnly bool) {
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	if countOnly {
+		p.up.ServeHTTP(w, r)
 		return
 	}
+	sw := &statusWriter{ResponseWriter: w}
+	start := time.Now()
+	p.up.ServeHTTP(sw, r)
+	e.Status, e.LatencyMS = sw.code(), time.Since(start).Milliseconds()
+	e.InputTokens, e.OutputTokens = sw.usage.in, sw.usage.out
+	if e.Status >= 400 {
+		e.Error = sw.errText()
+	}
+	p.rec.Add(e)
+}
 
-	// Copy request headers, skip hop-by-hop
-	for k, vals := range r.Header {
-		if hopByHop[strings.ToLower(k)] {
+func (p *Proxy) fail(w http.ResponseWriter, e stats.Entry, code int, msg string, countOnly bool) {
+	writeError(w, code, errType(code), msg)
+	if !countOnly {
+		e.Status, e.Error = code, msg
+		p.rec.Add(e)
+	}
+}
+
+// do sends a provider request with retries for connection errors and 5xx.
+// Retries only happen before any response bytes reach the client.
+func (p *Proxy) do(ctx context.Context, build func() (*http.Request, error)) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(300<<attempt) * time.Millisecond):
+			}
+		}
+		req, err := build()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := p.client.Do(req.WithContext(ctx))
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			lastErr = err
 			continue
 		}
-		for _, v := range vals {
-			upReq.Header.Add(k, v)
+		if resp.StatusCode >= 500 && resp.StatusCode != 501 && attempt < maxRetries {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+			resp.Body.Close()
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			continue
+		}
+		return resp, nil
+	}
+	return nil, lastErr
+}
+
+func setProviderHeaders(h http.Header, prov config.Provider) {
+	for k, v := range prov.Headers {
+		h.Set(k, v)
+	}
+}
+
+// toAnthropic forwards to an Anthropic-compatible provider. Client headers are
+// NOT copied, so the subscription token never leaves for a third party.
+func (p *Proxy) toAnthropic(w http.ResponseWriter, r *http.Request, prov config.Provider, rt config.Route, req request, e stats.Entry, countOnly bool) {
+	if rt.Model != "" {
+		req["model"] = rt.Model
+	}
+	if rt.MaxTokens > 0 {
+		if n, err := strconv.Atoi(fmt.Sprint(req["max_tokens"])); err != nil || n > rt.MaxTokens {
+			req["max_tokens"] = rt.MaxTokens
 		}
 	}
-	if len(body) > 0 {
-		upReq.ContentLength = int64(len(body))
+	if rt.Temperature != nil {
+		req["temperature"] = *rt.Temperature
 	}
-
-	resp, err := p.httpClient.Do(upReq)
+	body, err := json.Marshal(req)
 	if err != nil {
-		log.Printf("upstream error for %s: %v", upstreamURL, err)
-		http.Error(w, "bad gateway", http.StatusBadGateway)
+		p.fail(w, e, http.StatusBadRequest, "claude-hybrid: encode request: "+err.Error(), countOnly)
+		return
+	}
+	base := strings.TrimRight(prov.BaseURL, "/")
+	base = strings.TrimSuffix(base, "/v1")
+	target := base + r.URL.Path
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	version := r.Header.Get("anthropic-version")
+	if version == "" {
+		version = "2023-06-01"
+	}
+	start := time.Now()
+	resp, err := p.do(r.Context(), func() (*http.Request, error) {
+		out, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		out.Header.Set("Content-Type", "application/json")
+		out.Header.Set("anthropic-version", version)
+		if key := prov.Key(); key != "" {
+			out.Header.Set("x-api-key", key)
+			out.Header.Set("Authorization", "Bearer "+key)
+		}
+		setProviderHeaders(out.Header, prov)
+		return out, nil
+	})
+	if err != nil {
+		if countOnly {
+			writeCountEstimate(w, body)
+			return
+		}
+		p.fail(w, e, http.StatusBadGateway, fmt.Sprintf("claude-hybrid: provider %q unreachable: %v", prov.ID, err), countOnly)
 		return
 	}
 	defer resp.Body.Close()
-
-	// Copy response headers
-	for k, vals := range resp.Header {
-		if hopByHop[strings.ToLower(k)] {
-			continue
-		}
-		for _, v := range vals {
-			w.Header().Add(k, v)
+	if countOnly && resp.StatusCode != http.StatusOK {
+		writeCountEstimate(w, body) // many compatible APIs lack count_tokens
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		p.providerError(w, e, prov, resp, countOnly)
+		return
+	}
+	for _, k := range []string{"Content-Type", "Cache-Control"} {
+		if v := resp.Header.Get(k); v != "" {
+			w.Header().Set(k, v)
 		}
 	}
-	w.WriteHeader(resp.StatusCode)
+	w.WriteHeader(http.StatusOK)
+	sw := &statusWriter{ResponseWriter: w, status: 200, sse: strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")}
+	_, copyErr := copyFlush(sw, resp.Body)
+	if countOnly {
+		return
+	}
+	e.Status, e.LatencyMS = sw.code(), time.Since(start).Milliseconds()
+	e.InputTokens, e.OutputTokens = sw.usage.in, sw.usage.out
+	if copyErr != nil && r.Context().Err() == nil {
+		e.Error = "stream interrupted: " + copyErr.Error()
+	}
+	p.rec.Add(e)
+}
 
-	// Stream response body — handles both SSE and regular responses.
-	if f, ok := w.(http.Flusher); ok {
-		buf := make([]byte, 32*1024)
-		for {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				w.Write(buf[:n])
+// toOpenAI translates to Chat Completions and back.
+func (p *Proxy) toOpenAI(w http.ResponseWriter, r *http.Request, prov config.Provider, rt config.Route, req request, e stats.Entry, countOnly bool) {
+	raw, err := json.Marshal(req)
+	if err != nil {
+		p.fail(w, e, http.StatusBadRequest, "claude-hybrid: encode request: "+err.Error(), countOnly)
+		return
+	}
+	if countOnly {
+		writeCountEstimate(w, raw)
+		return
+	}
+	body, err := translate.ToOpenAI(raw, translate.Options{
+		Model: rt.Model, MaxTokensCap: rt.MaxTokens, MaxTokensField: prov.MaxTokensField,
+		Temperature: rt.Temperature, ReasoningEffort: rt.ReasoningEffort,
+	})
+	if err != nil {
+		p.fail(w, e, http.StatusBadRequest, "claude-hybrid: translate request: "+err.Error(), false)
+		return
+	}
+	target := strings.TrimRight(prov.BaseURL, "/") + "/chat/completions"
+	start := time.Now()
+	resp, err := p.do(r.Context(), func() (*http.Request, error) {
+		out, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		out.Header.Set("Content-Type", "application/json")
+		if key := prov.Key(); key != "" {
+			out.Header.Set("Authorization", "Bearer "+key)
+		}
+		setProviderHeaders(out.Header, prov)
+		return out, nil
+	})
+	if err != nil {
+		p.fail(w, e, http.StatusBadGateway, fmt.Sprintf("claude-hybrid: provider %q unreachable: %v", prov.ID, err), false)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		p.providerError(w, e, prov, resp, false)
+		return
+	}
+	// The model name shown to Claude Code: keep what it asked for so its
+	// own bookkeeping (context window, pricing labels) stays sane.
+	shownModel := e.ReqModel
+	isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
+	if e.Stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		flush := func() {
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		src := io.Reader(resp.Body)
+		if !isSSE { // provider ignored stream=true: wrap the JSON as one chunk
+			src = jsonAsSSE(resp.Body)
+		}
+		usage, err := translate.NewStream(w, flush, shownModel).Run(src)
+		e.Status, e.LatencyMS = 200, time.Since(start).Milliseconds()
+		e.InputTokens, e.OutputTokens = usage.InputTokens+usage.CacheRead, usage.OutputTokens
+		if err != nil && r.Context().Err() == nil {
+			e.Error = err.Error()
+		}
+		p.rec.Add(e)
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		p.fail(w, e, http.StatusBadGateway, "claude-hybrid: read provider response: "+err.Error(), false)
+		return
+	}
+	out, usage, err := translate.FromOpenAI(data, shownModel)
+	if err != nil {
+		p.fail(w, e, http.StatusBadGateway, fmt.Sprintf("claude-hybrid: provider %q: %v", prov.ID, err), false)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(out)
+	e.Status, e.LatencyMS = 200, time.Since(start).Milliseconds()
+	e.InputTokens, e.OutputTokens = usage.InputTokens+usage.CacheRead, usage.OutputTokens
+	p.rec.Add(e)
+}
+
+// providerError turns a provider failure into an Anthropic-style error.
+// 401/403 are mapped to 400: passing them on would make Claude Code think
+// the user's own Anthropic login expired.
+func (p *Proxy) providerError(w http.ResponseWriter, e stats.Entry, prov config.Provider, resp *http.Response, countOnly bool) {
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	detail := redact(strings.TrimSpace(string(data)))
+	if len(detail) > 1500 {
+		detail = detail[:1500] + "…"
+	}
+	code := resp.StatusCode
+	switch {
+	case code == http.StatusTooManyRequests:
+	case code >= 500:
+		code = http.StatusBadGateway
+	default:
+		code = http.StatusBadRequest
+	}
+	msg := fmt.Sprintf("claude-hybrid: provider %q returned HTTP %d: %s", prov.ID, resp.StatusCode, detail)
+	log.Printf("provider error: %s", msg)
+	p.fail(w, e, code, msg, countOnly)
+}
+
+func errType(code int) string {
+	switch {
+	case code == http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case code >= 500:
+		return "api_error"
+	}
+	return "invalid_request_error"
+}
+
+func writeError(w http.ResponseWriter, code int, typ, msg string) {
+	b, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(b)
+}
+
+// writeCountEstimate answers count_tokens locally (about 4 chars per token).
+func writeCountEstimate(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"input_tokens":%d}`, len(body)/4+1)
+}
+
+var redactRE = regexp.MustCompile(`(?i)(bearer\s+|sk-|key-)[A-Za-z0-9._\-]{8,}`)
+
+func redact(s string) string { return redactRE.ReplaceAllString(s, "${1}[REDACTED]") }
+
+// copyFlush copies src to dst, flushing after every read so SSE stays live.
+func copyFlush(dst io.Writer, src io.Reader) (int64, error) {
+	f, _ := dst.(http.Flusher)
+	buf := make([]byte, 32<<10)
+	var n int64
+	for {
+		k, err := src.Read(buf)
+		if k > 0 {
+			if _, werr := dst.Write(buf[:k]); werr != nil {
+				return n, werr
+			}
+			n += int64(k)
+			if f != nil {
 				f.Flush()
 			}
-			if readErr != nil {
-				break
-			}
 		}
-	} else {
-		io.Copy(w, resp.Body)
-	}
-}
-
-var hopByHop = map[string]bool{
-	"connection":        true,
-	"keep-alive":        true,
-	"transfer-encoding": true,
-	"te":                true,
-	"trailers":          true,
-	"upgrade":           true,
-}
-
-func (p *Proxy) forwardUpstream(tlsConn net.Conn, host, port string, req *http.Request, body []byte) bool {
-	var url string
-	if port == "443" {
-		url = "https://" + host + req.URL.RequestURI()
-	} else {
-		url = "https://" + net.JoinHostPort(host, port) + req.URL.RequestURI()
-	}
-
-	var bodyReader io.Reader
-	if len(body) > 0 {
-		bodyReader = strings.NewReader(string(body))
-	}
-
-	upReq, err := http.NewRequest(req.Method, url, bodyReader)
-	if err != nil {
-		sendError(tlsConn, 502, "Bad Gateway")
-		return false
-	}
-
-	// Copy headers, skip hop-by-hop
-	for k, vals := range req.Header {
-		if hopByHop[strings.ToLower(k)] {
-			continue
+		if err == io.EOF {
+			return n, nil
 		}
-		for _, v := range vals {
-			upReq.Header.Add(k, v)
-		}
-	}
-	if len(body) > 0 {
-		upReq.ContentLength = int64(len(body))
-	}
-
-	resp, err := p.httpClient.Do(upReq)
-	if err != nil {
-		if p.verbose || isAPIHost(host) {
-			log.Printf("upstream error for %s: %v", host, err)
-		}
-		sendError(tlsConn, 502, "Bad Gateway")
-		return false
-	}
-	defer resp.Body.Close()
-
-	// Three cases for forwarding the upstream response over the HTTP/1.1
-	// tunnel to the client:
-	//
-	// 1. Content-Length present → stream directly, client knows body size.
-	// 2. SSE (text/event-stream) → stream directly, close connection after
-	//    (SSE has no Content-Length and may run for minutes; buffering would
-	//    block or OOM).
-	// 3. Chunked / unknown length (non-SSE) → buffer, inject Content-Length
-	//    so the keep-alive connection can be reused.
-	isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
-	hasCL := resp.ContentLength >= 0
-
-	if hasCL || isSSE {
-		// Stream directly
-		writeResponseHeaders(tlsConn, resp)
-		if _, err := io.Copy(tlsConn, resp.Body); err != nil {
-			p.logVerbose("response streaming error for %s: %v", host, err)
-			return false
-		}
-		// SSE streams have no defined end marker in HTTP/1.1 without
-		// Content-Length or Transfer-Encoding, so close the connection.
-		if isSSE && !hasCL {
-			return false
-		}
-	} else {
-		// Buffer body and add Content-Length for connection reuse
-		respBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxBodyBytes+1))
 		if err != nil {
-			p.logVerbose("response read error for %s: %v", host, err)
-			return false
+			return n, err
 		}
-		if int64(len(respBody)) > config.MaxBodyBytes {
-			p.logVerbose("response from %s exceeded size limit", host)
-			sendError(tlsConn, 502, "Bad Gateway")
-			return false
-		}
-		writeResponseHeadersWithCL(tlsConn, resp, len(respBody))
-		tlsConn.Write(respBody)
-	}
-
-	return true
-}
-
-func writeResponseHeaders(w io.Writer, resp *http.Response) {
-	fmt.Fprintf(w, "HTTP/1.1 %s\r\n", resp.Status) // "200 OK"
-	for k, vals := range resp.Header {
-		if hopByHop[strings.ToLower(k)] {
-			continue
-		}
-		for _, v := range vals {
-			fmt.Fprintf(w, "%s: %s\r\n", k, v)
-		}
-	}
-	fmt.Fprint(w, "\r\n")
-}
-
-func writeResponseHeadersWithCL(w io.Writer, resp *http.Response, bodyLen int) {
-	fmt.Fprintf(w, "HTTP/1.1 %s\r\n", resp.Status)
-	for k, vals := range resp.Header {
-		if hopByHop[strings.ToLower(k)] {
-			continue
-		}
-		for _, v := range vals {
-			fmt.Fprintf(w, "%s: %s\r\n", k, v)
-		}
-	}
-	fmt.Fprintf(w, "Content-Length: %d\r\n", bodyLen)
-	fmt.Fprint(w, "\r\n")
-}
-
-// forwardLocal handles a request whose system field carried a routing marker.
-// The proxy is a pure URL forwarder: detect marker → strip marker → forward
-// body AS-IS to the resolved URL → relay response.
-func (p *Proxy) forwardLocal(w io.Writer, route RouteDirective, body []byte) {
-	routeURL := strings.TrimRight(route.Route, "/")
-
-	if !strings.HasPrefix(routeURL, "http") {
-		log.Printf("invalid route URL: %s", routeURL)
-		errBody := formatError("invalid_request_error",
-			fmt.Sprintf("Invalid route URL %q in marker", routeURL))
-		sendAnthropicError(w, 400, errBody)
-		return
-	}
-
-	if p.routeResolver == nil {
-		// No config — fall back to stub response
-		isStreaming := false
-		var data map[string]interface{}
-		if json.Unmarshal(body, &data) == nil {
-			if s, ok := data["stream"].(bool); ok {
-				isStreaming = s
-			}
-		}
-		sendLocalStub(w, routeURL, isStreaming)
-		return
-	}
-
-	start := time.Now()
-
-	isStreaming := false
-	var data map[string]interface{}
-	if json.Unmarshal(body, &data) == nil {
-		if s, ok := data["stream"].(bool); ok {
-			isStreaming = s
-		}
-	}
-
-	endpoint := routeURL + "/v1/messages"
-	maxAttempts := 1 + config.EgressMaxRetries
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		localReq, err := http.NewRequest("POST", endpoint, strings.NewReader(string(body)))
-		if err != nil {
-			log.Printf("failed to create egress request: %v", err)
-			errBody := formatError("api_error", fmt.Sprintf("Failed to create request: %v", err))
-			sendAnthropicError(w, 500, errBody)
-			return
-		}
-		localReq.Header.Set("Content-Type", "application/json")
-		localReq.Header.Set("anthropic-version", "2023-06-01")
-
-		resp, err := p.localClient.Do(localReq)
-		if err != nil {
-			cat := classifyError(err)
-			log.Printf("[LOCAL_ERR:%s] egress unreachable for %s: %v (%s)", cat, routeURL, err, endpoint)
-			errBody := formatError("api_error",
-				fmt.Sprintf("[%s] Route '%s' unreachable: %v (%s)", cat, routeURL, err, endpoint))
-			sendAnthropicError(w, 502, errBody)
-			return
-		}
-
-		if isRetryableStatus(resp.StatusCode) && attempt < maxAttempts {
-			io.ReadAll(io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
-			delay := retryDelay(attempt)
-			log.Printf("[LOCAL_RETRY:%d/%d] route %s returned %d — retrying in %v",
-				attempt, maxAttempts, routeURL, resp.StatusCode, delay)
-			time.Sleep(delay)
-			continue
-		}
-
-		if resp.StatusCode != 200 {
-			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
-			sanitized := sanitizeForLog(string(respBody))
-			log.Printf("[LOCAL_ERR:HTTP_%d] route %s returned %d: %s", resp.StatusCode, routeURL, resp.StatusCode, sanitized)
-			forwarded := respBody
-			if !isAnthropicError(respBody) {
-				forwarded = formatError("api_error",
-					fmt.Sprintf("[HTTP_%d] Route '%s' returned %d: %s", resp.StatusCode, routeURL, resp.StatusCode, sanitized))
-			}
-			code := 502
-			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-				code = 400
-			}
-			sendAnthropicError(w, code, forwarded)
-			return
-		}
-
-		if err := resp.Write(w); err != nil {
-			resp.Body.Close()
-			cat := classifyError(err)
-			log.Printf("[LOCAL_ERR:%s] response write for %s: %v", cat, routeURL, err)
-			return
-		}
-		resp.Body.Close()
-
-		streamTag := ""
-		if isStreaming {
-			streamTag = "streaming, "
-		}
-		retryTag := ""
-		if attempt > 1 {
-			retryTag = fmt.Sprintf("retry %d, ", attempt-1)
-		}
-		log.Printf("LOCAL_OK %s (%s%s%dms)", routeURL, retryTag, streamTag, time.Since(start).Milliseconds())
-		return
 	}
 }
 
-
-// injectReminder appends a <system-reminder> text block to every user message
-// that contains a tool_result content block. This ensures the reminder is
-// present on every tool call round-trip back to the API.
-func injectReminder(body []byte, reminder string) []byte {
-	var data map[string]interface{}
-	if json.Unmarshal(body, &data) != nil {
-		return body
+// jsonAsSSE wraps a non-streaming Chat Completions JSON reply as a stream of
+// one chunk, for providers that ignore stream=true.
+func jsonAsSSE(r io.Reader) io.Reader {
+	data, _ := io.ReadAll(io.LimitReader(r, maxBody))
+	var full struct {
+		ID      string `json:"id"`
+		Choices []struct {
+			Message      json.RawMessage `json:"message"`
+			FinishReason *string         `json:"finish_reason"`
+		} `json:"choices"`
+		Usage json.RawMessage `json:"usage"`
 	}
-	messages, ok := data["messages"].([]interface{})
-	if !ok || len(messages) == 0 {
-		return body
+	if json.Unmarshal(data, &full) != nil || len(full.Choices) == 0 {
+		return bytes.NewReader(append(append([]byte("data: "), data...), "\n\ndata: [DONE]\n\n"...))
 	}
-	reminderBlock := map[string]interface{}{
-		"type": "text",
-		"text": "<system-reminder>\n" + reminder + "\n</system-reminder>",
+	chunk := map[string]any{
+		"id":      full.ID,
+		"choices": []any{map[string]any{"delta": full.Choices[0].Message, "finish_reason": full.Choices[0].FinishReason}},
 	}
-	modified := false
-	for i, msg := range messages {
-		m, ok := msg.(map[string]interface{})
-		if !ok || m["role"] != "user" {
-			continue
-		}
-		content, ok := m["content"].([]interface{})
-		if !ok {
-			continue
-		}
-		hasToolResult := false
-		for _, block := range content {
-			if bm, ok := block.(map[string]interface{}); ok {
-				if bm["type"] == "tool_result" {
-					hasToolResult = true
-					break
-				}
-			}
-		}
-		if hasToolResult {
-			m["content"] = append(content, reminderBlock)
-			messages[i] = m
-			modified = true
-		}
+	if len(full.Usage) > 0 {
+		chunk["usage"] = full.Usage
 	}
-	if !modified {
-		return body
-	}
-	data["messages"] = messages
-	out, err := json.Marshal(data)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
-// rewriteSystemPrompt replaces the system field in the request body.
-// It preserves any @opencode-agent:NAME markers from the original system
-// field by appending them to the new system prompt.
-func rewriteSystemPrompt(body []byte, newSystem string) []byte {
-	var data map[string]interface{}
-	if json.Unmarshal(body, &data) != nil {
-		return body
-	}
-
-	// Preserve @opencode-agent markers from the original system field.
-	var preservedMarkers []string
-	if sys, ok := data["system"]; ok {
-		switch s := sys.(type) {
-		case string:
-			if matches := opencodeAgentRE.FindAllString(s, -1); len(matches) > 0 {
-				preservedMarkers = matches
-			}
-		case []interface{}:
-			for _, block := range s {
-				if bm, ok := block.(map[string]interface{}); ok {
-					if text, ok := bm["text"].(string); ok {
-						if matches := opencodeAgentRE.FindAllString(text, -1); len(matches) > 0 {
-							preservedMarkers = append(preservedMarkers, matches...)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	finalSystem := newSystem
-	if len(preservedMarkers) > 0 {
-		finalSystem = newSystem + "\n" + strings.Join(preservedMarkers, "\n")
-	}
-
-	data["system"] = finalSystem
-	out, err := json.Marshal(data)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
-
-
-// isAnthropicError returns true if body matches {"type":"error","error":{...}}.
-func isAnthropicError(body []byte) bool {
-	var probe struct {
-		Type  string          `json:"type"`
-		Error json.RawMessage `json:"error"`
-	}
-	if err := json.Unmarshal(body, &probe); err != nil {
-		return false
-	}
-	return probe.Type == "error" && len(probe.Error) > 0
-}
-
-func sendAnthropicError(w io.Writer, httpStatus int, body []byte) {
-	fmt.Fprintf(w, "HTTP/1.1 %d Error\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-		httpStatus, len(body))
-	w.Write(body)
-}
-
-func sendError(w io.Writer, code int, status string) {
-	body := status
-	fmt.Fprintf(w, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
-		code, status, len(body), body)
-}
-
-func deadlineFromNow(d time.Duration) time.Time {
-	return time.Now().Add(d)
-}
-
-func (p *Proxy) logVerbose(format string, args ...interface{}) {
-	if p.verbose {
-		log.Printf(format, args...)
-	}
-}
-
-// isRetryableStatus returns true for HTTP status codes worth retrying.
-// 499 = client closed (musistudio's upstream timeout), 500-503 = server errors.
-func isRetryableStatus(code int) bool {
-	return code == 499 || (code >= 500 && code <= 503)
-}
-
-// retryDelay returns the backoff duration for a given attempt (1-based).
-// Uses exponential backoff with jitter: base * 2^(attempt-1) + random jitter.
-func retryDelay(attempt int) time.Duration {
-	base := config.EgressRetryBaseMs
-	for i := 1; i < attempt; i++ {
-		base *= 2
-	}
-	jitter := rand.Intn(config.EgressRetryJitter + 1)
-	return time.Duration(base+jitter) * time.Millisecond
-}
-
-// isAPIHost returns true for hosts where upstream errors are worth logging.
-func isAPIHost(host string) bool {
-	return strings.Contains(host, "anthropic.com") ||
-		strings.Contains(host, "openai.com") ||
-		strings.Contains(host, "localhost") ||
-		strings.Contains(host, "127.0.0.1")
-}
-
-var opencodeAgentRE = regexp.MustCompile(`(?:<!--\s*)?@opencode-agent:[A-Za-z0-9_-]+(?:\s*-->)?`)
-var bearerRE = regexp.MustCompile(`(?i)bearer\s+\S+`)
-var apiKeyRE = regexp.MustCompile(`(?i)(sk-|key-)[a-zA-Z0-9]{8,}`)
-
-// sanitizeForLog redacts Bearer tokens and API key patterns from text.
-func sanitizeForLog(s string) string {
-	s = bearerRE.ReplaceAllString(s, "Bearer [REDACTED]")
-	s = apiKeyRE.ReplaceAllString(s, "$1[REDACTED]")
-	return s
+	b, _ := json.Marshal(chunk)
+	return strings.NewReader("data: " + string(b) + "\n\ndata: [DONE]\n\n")
 }

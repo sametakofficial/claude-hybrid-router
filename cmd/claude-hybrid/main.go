@@ -1,9 +1,10 @@
-// claude-hybrid launches a MITM routing proxy and runs claude through it.
+// claude-hybrid runs Claude Code through a local router that sends chosen
+// subagents and models to other providers. See README.md.
 package main
 
 import (
 	"context"
-	"flag"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,357 +14,423 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/peter-wagstaff/claude-hybrid-router/internal/config"
-	"github.com/peter-wagstaff/claude-hybrid-router/internal/mitm"
-	"github.com/peter-wagstaff/claude-hybrid-router/internal/proxy"
+	"github.com/sametakofficial/claude-hybrid-router/internal/config"
+	"github.com/sametakofficial/claude-hybrid-router/internal/panel"
+	"github.com/sametakofficial/claude-hybrid-router/internal/proxy"
+	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
 )
 
-// ownFlags maps our proxy flags to whether they consume a value.
-// Anything not in this set is forwarded verbatim to claude, so users can
-// type `claude-hybrid --dangerously-skip-permissions /some/path` without
-// the `--` separator. `--` is still honored as an explicit end-of-own-
-// flags marker in case a claude flag name ever collides (e.g. --verbose).
-var ownFlagTakesValue = map[string]bool{
-	"port":          true,
-	"bind":          true,
-	"certs-dir":     true,
-	"proxy-only":    false,
-	"verbose":       false,
-	"require-trust": false,
-	"h":             false,
-	"help":          false,
-}
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "2.0.0-dev"
 
-// splitArgs separates process args into (ownArgs, claudeArgs). Known flags
-// from ownFlagTakesValue land in ownArgs (with their values); everything
-// else — including unknown --flags, bare positional args, and the tail
-// after `--` — is passed through to claude.
-func splitArgs(args []string) (own, claude []string) {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--" {
-			claude = append(claude, args[i+1:]...)
-			return
-		}
-		if !strings.HasPrefix(a, "-") || a == "-" {
-			claude = append(claude, a)
-			continue
-		}
-		name := strings.TrimLeft(a, "-")
-		value := ""
-		hasInlineValue := false
-		if idx := strings.Index(name, "="); idx >= 0 {
-			value = name[idx+1:]
-			name = name[:idx]
-			hasInlineValue = true
-		}
-		takesValue, known := ownFlagTakesValue[name]
-		if !known {
-			claude = append(claude, a)
-			continue
-		}
-		own = append(own, a)
-		if takesValue && !hasInlineValue {
-			if i+1 < len(args) {
-				i++
-				own = append(own, args[i])
-			}
-		}
-		_ = value
-	}
-	return
-}
+const usage = `claude-hybrid — route Claude Code subagents to any model provider
+
+Usage:
+  claude-hybrid [claude args...]   start the router if needed, then run claude through it
+  claude-hybrid serve              run the router in the foreground (proxy + web panel)
+  claude-hybrid start | stop | restart | status
+  claude-hybrid panel              print the web panel URL and open it
+  claude-hybrid env                print the export line to use the router from any shell
+  claude-hybrid install-service    install and start a systemd user service (Linux)
+  claude-hybrid version
+
+Every argument that is not a claude-hybrid command goes to claude unchanged,
+e.g. "claude-hybrid --resume" or "claude-hybrid -p 'hi'". Use
+"claude-hybrid -- serve" to pass the word "serve" to claude.
+
+Config: ~/.claude-hybrid/config.yaml (edit in the panel). Override the folder
+with CLAUDE_HYBRID_HOME.
+`
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "trust" {
-		os.Exit(runTrust(os.Args[2:]))
+	args := os.Args[1:]
+	cmd := ""
+	if len(args) > 0 {
+		cmd = args[0]
 	}
-
-	ownArgs, claudeArgs := splitArgs(os.Args[1:])
-
-	fs := flag.NewFlagSet("claude-hybrid", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.Usage = func() {}
-	port := fs.Int("port", 0, "proxy listen port (0 = random)")
-	bind := fs.String("bind", "127.0.0.1", "proxy bind address")
-	certsDir := fs.String("certs-dir", defaultCertsDir(), "directory for CA cert/key")
-	proxyOnly := fs.Bool("proxy-only", false, "run proxy without launching claude")
-	verbose := fs.Bool("verbose", false, "enable verbose logging")
-	requireTrust := fs.Bool("require-trust", false, "abort if CA is not installed in the system trust store")
-	help := fs.Bool("help", false, "show claude-hybrid usage")
-	helpShort := fs.Bool("h", false, "show claude-hybrid usage")
-
-	if err := fs.Parse(ownArgs); err != nil {
+	var err error
+	switch cmd {
+	case "serve":
+		err = serve()
+	case "start":
+		err = start(true)
+	case "stop":
+		err = stop()
+	case "restart":
+		if err = stop(); err == nil {
+			err = start(true)
+		}
+	case "status":
+		err = status()
+	case "panel":
+		err = openPanel()
+	case "env":
+		err = printEnv()
+	case "install-service":
+		err = installService()
+	case "version", "--version":
+		fmt.Println("claude-hybrid", version)
+	case "help", "-h", "--help":
+		fmt.Print(usage)
+	case "--":
+		err = launch(args[1:])
+	default:
+		err = launch(args)
+	}
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.ExitCode())
+		}
 		fmt.Fprintln(os.Stderr, "claude-hybrid:", err)
-		printUsage(fs)
-		os.Exit(2)
-	}
-	if *help || *helpShort {
-		printUsage(fs)
-		os.Exit(0)
-	}
-
-	// Ensure base directory exists
-	baseDir := filepath.Dir(*certsDir)
-	if err := os.MkdirAll(baseDir, 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "create base dir: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Open log file with daily rotation. Use an exclusive lock for
-	// truncation to prevent races between concurrent instances.
-	logPath := filepath.Join(baseDir, "proxy.log")
-	if shouldTruncateLog(logPath) {
-		tryTruncateLog(logPath)
-	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open log file: %v\n", err)
-		os.Exit(1)
-	}
-	defer logFile.Close()
-	sessionID := fmt.Sprintf("s%d", os.Getpid())
-	log.SetOutput(logFile)
-	log.SetPrefix(fmt.Sprintf("[%s] ", sessionID))
-
-	// Rotate any pre-existing certs dir whose schema predates the current
-	// code — on-disk CAs from older versions lack the extensions modern
-	// TLS clients require, so a silent reuse would reintroduce the very
-	// UNABLE_TO_VERIFY_LEAF_SIGNATURE errors we're fixing.
-	if err := invalidateIfStale(*certsDir, log.Printf); err != nil {
-		log.Fatalf("invalidate stale certs: %v", err)
-	}
-	if err := os.MkdirAll(*certsDir, 0700); err != nil {
-		log.Fatalf("create certs dir: %v", err)
-	}
-
-	certPath, _, certPEM, keyPEM, err := ensureCA(*certsDir, log.Printf)
-	if err != nil {
-		log.Fatalf("ensure CA: %v", err)
-	}
-	// Record the schema version after the CA is on disk so future runs
-	// know whether this install is current.
-	if err := writeSchemaVersion(*certsDir); err != nil {
-		log.Printf("warn: write schema version: %v", err)
-	}
-
-	// Startup self-check — catches cert template regressions before the
-	// child process hits them over TLS.
-	if err := verifyCertChain(certPEM, keyPEM); err != nil {
-		log.Fatalf("cert chain self-check failed: %v", err)
-	}
-
-	// Combined CA bundle (system roots + our CA) for tools that accept a
-	// single file via SSL_CERT_FILE / REQUESTS_CA_BUNDLE / etc.
-	bundlePath, err := ensureBundle(*certsDir, certPEM, log.Printf)
-	if err != nil {
-		log.Fatalf("ensure bundle: %v", err)
-	}
-
-	// Load CA into the in-memory cache.
-	certCache, err := mitm.NewCertCache(certPEM, keyPEM)
-	if err != nil {
-		log.Fatalf("create cert cache: %v", err)
-	}
-
-	// Trust-store advisory. NODE_EXTRA_CA_CERTS covers Claude Code's
-	// primary HTTPS paths; system trust is still needed for OAuth
-	// redirects, pip, curl, and any spawned subprocess that can't be
-	// told about our CA via env vars.
-	trusted, trustErr := ensureSystemTrustInstalled(certPath)
-	if !trusted {
-		msg := fmt.Sprintf("CA is not installed in the system trust store. OAuth, pip, and curl may fail. Auto-install was unsuccessful. CA path: %s", certPath)
-		if *requireTrust {
-			if trustErr != nil {
-				log.Fatalf("%s: %v", msg, trustErr)
-			}
-			log.Fatalf("%s", msg)
-		}
-		log.Printf("warn: %s", msg)
-		fmt.Fprintln(os.Stderr, "claude-hybrid: "+msg)
-	}
-
-	// Load config (optional)
-	opts := []proxy.Option{proxy.WithVerbose(*verbose)}
-	cfgPath := filepath.Join(baseDir, "config.yaml")
-	if _, err := os.Stat(cfgPath); err == nil {
-		cfg, err := config.LoadConfig(cfgPath)
-		if err != nil {
-			log.Fatalf("load config: %v", err)
-		}
-		resolver, err := config.NewRouteResolver(cfg)
-		if err != nil {
-			log.Fatalf("build route resolver: %v", err)
-		}
-		opts = append(opts, proxy.WithRouteResolver(resolver))
-		log.Printf("Loaded config from %s", cfgPath)
-	} else {
-		log.Printf("No config at %s — using defaults", cfgPath)
-	}
-
-	// Start proxy (HTTP handler for CONNECT + reverse-proxy)
-	p := proxy.New(certCache, opts...)
-	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", *bind, *port))
-	if err != nil {
-		log.Fatalf("listen: %v", err)
-	}
-	proxyAddr := ln.Addr().String()
-	log.Printf("Proxy listening on %s (CA=%s, bundle=%s, systemTrust=%v)", proxyAddr, certPath, bundlePath, trusted)
-
-	srv := &http.Server{Handler: p}
-	go srv.Serve(ln)
-
-	shutdown := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(ctx)
-	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
-
-	if *proxyOnly {
-		log.Println("Running in proxy-only mode (Ctrl+C to stop)")
-		<-sigCh
-		shutdown()
-		os.Exit(0)
-	}
-
-	// Launch claude with proxy env vars. claudeArgs was already assembled
-	// from the pre-flag split; append any positional args our FlagSet
-	// picked up (unlikely, but harmless if someone passes e.g. a path
-	// after a value-less own flag). We do NOT rewrite or strip anything
-	// else — claude-hybrid is a transparent wrapper, so every arg claude
-	// would accept must reach it verbatim. Working directory follows the
-	// shell convention (cd /dir && claude-hybrid) exactly like claude.
-	claudeArgs = append(claudeArgs, fs.Args()...)
-
-	childEnv := buildChildEnv(proxyAddr, certPath, bundlePath)
-	fmt.Fprintf(os.Stderr, "claude-hybrid: launching claude %v\n", claudeArgs)
-
-	go func() {
-		<-sigCh
-		shutdown()
-	}()
-
-	cmd := exec.Command(resolveClaudeBinary(), claudeArgs...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = childEnv
-
-	if err := cmd.Run(); err != nil {
-		shutdown()
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
-		log.Fatalf("claude: %v", err)
-	}
-	shutdown()
 }
 
-func printUsage(fs *flag.FlagSet) {
-	fmt.Fprint(os.Stderr, `Usage: claude-hybrid [proxy-flags] [claude-args...]
+func configPath() string { return filepath.Join(config.Home(), "config.yaml") }
+func pidPath() string    { return filepath.Join(config.Home(), "serve.pid") }
 
-Transparent wrapper around 'claude' that routes all HTTPS traffic through
-a local MITM proxy. Every arg claude accepts is forwarded verbatim. To
-open a project directory, use the same shell idiom as plain claude:
-
-    cd /path/to/project && claude-hybrid
-
-Unknown flags are forwarded to claude, so '--' is only needed when a
-claude flag name collides with ours (e.g. --verbose).
-
-Examples:
-  claude-hybrid
-  claude-hybrid --dangerously-skip-permissions
-  claude-hybrid --model opus --resume
-  cd ~/myproject && claude-hybrid
-  claude-hybrid --port 18900 --proxy-only
-  claude-hybrid -- --verbose          # forces --verbose onto claude
-
-Proxy flags:
-`)
-	fs.SetOutput(os.Stderr)
-	fs.PrintDefaults()
-	fs.SetOutput(io.Discard)
+func loadConfig() (*config.Config, error) {
+	st, err := config.Open(configPath())
+	if err != nil {
+		return nil, err
+	}
+	return st.Get(), nil
 }
 
-// shouldTruncateLog returns true if the log file was last modified before today.
-func shouldTruncateLog(path string) bool {
-	info, err := os.Stat(path)
+// dialAddr turns a listen address into one we can connect to.
+func dialAddr(listen string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return listen
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func healthy(listen string) bool {
+	c := http.Client{Timeout: 700 * time.Millisecond}
+	resp, err := c.Get("http://" + dialAddr(listen) + proxy.HealthPath)
 	if err != nil {
 		return false
 	}
-	now := time.Now()
-	modTime := info.ModTime()
-	return modTime.Year() != now.Year() || modTime.YearDay() != now.YearDay()
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode == 200 && strings.Contains(string(b), "claude-hybrid")
 }
 
-func defaultCertsDir() string {
-	home, err := os.UserHomeDir()
+// ---- serve -----------------------------------------------------------------
+
+func openLog(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	if fi, err := os.Stat(path); err == nil && fi.Size() > 10<<20 {
+		os.Rename(path, path+".1")
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+}
+
+func serve() error {
+	store, err := config.Open(configPath())
 	if err != nil {
-		return ".claude-hybrid/certs"
+		return err
 	}
-	return filepath.Join(home, ".claude-hybrid", "certs")
+	cfg := store.Get()
+	lf, err := openLog(cfg.Server.LogFile)
+	if err != nil {
+		return err
+	}
+	defer lf.Close()
+	log.SetOutput(io.MultiWriter(lf, os.Stderr))
+	log.SetFlags(log.LstdFlags)
+
+	rec := stats.New(1000, func(e stats.Entry) {
+		target := "anthropic"
+		if e.Provider != "" {
+			target = e.Provider + "/" + e.Model
+		}
+		line := fmt.Sprintf("%s %s %s -> %s status=%d %dms in=%d out=%d", e.Kind, orDash(e.Source), e.ReqModel, target, e.Status, e.LatencyMS, e.InputTokens, e.OutputTokens)
+		if e.Error != "" {
+			line += " error=" + strconv.Quote(e.Error)
+		}
+		log.Print(line)
+	})
+	px := proxy.New(store.Current, rec)
+	pn := &panel.Panel{Store: store, Rec: rec, Proxy: px, Version: version, Started: time.Now()}
+
+	proxyLn, err := net.Listen("tcp", cfg.Server.ProxyListen)
+	if err != nil {
+		if healthy(cfg.Server.ProxyListen) {
+			return fmt.Errorf("already running on %s", cfg.Server.ProxyListen)
+		}
+		return fmt.Errorf("proxy listen %s: %w", cfg.Server.ProxyListen, err)
+	}
+	panelLn, err := net.Listen("tcp", cfg.Server.PanelListen)
+	if err != nil {
+		proxyLn.Close()
+		return fmt.Errorf("panel listen %s: %w", cfg.Server.PanelListen, err)
+	}
+	os.WriteFile(pidPath(), []byte(strconv.Itoa(os.Getpid())), 0o600)
+	defer os.Remove(pidPath())
+
+	// ReadHeaderTimeout only: streaming responses can run for many minutes.
+	proxySrv := &http.Server{Handler: px, ReadHeaderTimeout: 30 * time.Second}
+	panelSrv := &http.Server{Handler: pn.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	errc := make(chan error, 2)
+	go func() { errc <- proxySrv.Serve(proxyLn) }()
+	go func() { errc <- panelSrv.Serve(panelLn) }()
+	go watchConfig(store)
+
+	log.Printf("claude-hybrid %s: proxy on http://%s, panel on http://%s, config %s",
+		version, cfg.Server.ProxyListen, cfg.Server.PanelListen, store.Path())
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	select {
+	case s := <-sig:
+		log.Printf("stopping (%v)", s)
+	case err := <-errc:
+		log.Printf("server stopped: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	panelSrv.Shutdown(ctx)
+	proxySrv.Shutdown(ctx)
+	return nil
 }
 
-func ensureCA(certsDir string, logf func(string, ...interface{})) (certPath, keyPath string, certPEM, keyPEM []byte, err error) {
-	certPath = filepath.Join(certsDir, "ca.crt")
-	keyPath = filepath.Join(certsDir, "ca.key")
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
 
-	if _, statErr := os.Stat(certPath); os.IsNotExist(statErr) {
-		lockPath := filepath.Join(certsDir, "ca.lock")
-		lockFile, lockErr := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if lockErr != nil {
-			if logf != nil {
-				logf("Waiting for another instance to generate CA certificate...")
-			}
-			for i := 0; i < 50; i++ {
-				time.Sleep(100 * time.Millisecond)
-				if _, err := os.Stat(certPath); err == nil {
-					break
-				}
-			}
-			if _, err := os.Stat(certPath); os.IsNotExist(err) {
-				return "", "", nil, nil, fmt.Errorf("timed out waiting for CA certificate generation")
-			}
-		} else {
-			lockFile.Close()
-			defer os.Remove(lockPath)
-			if logf != nil {
-				logf("Generating MITM CA certificate...")
-			}
-			certPEM, keyPEM, err = mitm.GenerateCA()
-			if err != nil {
-				return "", "", nil, nil, err
-			}
-			if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
-				return "", "", nil, nil, err
-			}
-			if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
-				return "", "", nil, nil, err
-			}
-			if logf != nil {
-				logf("CA certificate written to %s", certPath)
-			}
+// watchConfig reloads the config when the file is edited by hand.
+func watchConfig(store *config.Store) {
+	var last time.Time
+	if fi, err := os.Stat(store.Path()); err == nil {
+		last = fi.ModTime()
+	}
+	for range time.Tick(2 * time.Second) {
+		fi, err := os.Stat(store.Path())
+		if err != nil || !fi.ModTime().After(last) {
+			continue
+		}
+		last = fi.ModTime()
+		if err := store.Reload(); err != nil {
+			log.Printf("config changed on disk but is invalid, keeping the old one: %v", err)
 		}
 	}
+}
 
-	if certPEM == nil {
-		certPEM, err = os.ReadFile(certPath)
-		if err != nil {
-			return "", "", nil, nil, err
+// ---- start / stop / status -------------------------------------------------
+
+// start runs "serve" in the background unless the router is already up.
+func start(verbose bool) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if healthy(cfg.Server.ProxyListen) {
+		if verbose {
+			fmt.Printf("claude-hybrid is running: panel http://%s\n", dialAddr(cfg.Server.PanelListen))
+		}
+		return nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(filepath.Join(config.Home(), "serve.out"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	c := exec.Command(exe, "serve")
+	c.Stdout, c.Stderr = out, out
+	detach(c)
+	if err := c.Start(); err != nil {
+		return err
+	}
+	go c.Wait()
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if healthy(cfg.Server.ProxyListen) {
+			if verbose {
+				fmt.Printf("claude-hybrid started: panel http://%s\n", dialAddr(cfg.Server.PanelListen))
+			}
+			return nil
 		}
 	}
-	if keyPEM == nil {
-		keyPEM, err = os.ReadFile(keyPath)
-		if err != nil {
-			return "", "", nil, nil, err
+	b, _ := os.ReadFile(filepath.Join(config.Home(), "serve.out"))
+	return fmt.Errorf("router did not start:\n%s", strings.TrimSpace(string(b)))
+}
+
+func stop() error {
+	if runtime.GOOS == "linux" && exec.Command("systemctl", "--user", "is-active", "--quiet", "claude-hybrid").Run() == nil {
+		return exec.Command("systemctl", "--user", "stop", "claude-hybrid").Run()
+	}
+	b, err := os.ReadFile(pidPath())
+	if err != nil {
+		fmt.Println("claude-hybrid is not running")
+		return nil
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	proc, err := os.FindProcess(pid)
+	if err != nil || pid <= 0 {
+		return fmt.Errorf("bad pid file %s", pidPath())
+	}
+	if err := terminate(proc); err != nil {
+		os.Remove(pidPath())
+		fmt.Println("claude-hybrid was not running")
+		return nil
+	}
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if _, err := os.Stat(pidPath()); err != nil {
+			fmt.Println("claude-hybrid stopped")
+			return nil
 		}
 	}
-	return certPath, keyPath, certPEM, keyPEM, nil
+	return fmt.Errorf("process %d did not stop", pid)
+}
+
+func status() error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	state := "stopped"
+	if healthy(cfg.Server.ProxyListen) {
+		state = "running"
+	}
+	fmt.Printf("state:   %s\nproxy:   http://%s\npanel:   http://%s\nconfig:  %s\nagents:  %s\nlog:     %s\n",
+		state, dialAddr(cfg.Server.ProxyListen), dialAddr(cfg.Server.PanelListen), configPath(), cfg.Server.AgentsDir, cfg.Server.LogFile)
+	fmt.Printf("routes:  %d providers, %d routed agents, %d rules\n", len(cfg.Providers), len(cfg.Agents), len(cfg.Rules))
+	return nil
+}
+
+func openPanel() error {
+	if err := start(false); err != nil {
+		return err
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	url := "http://" + dialAddr(cfg.Server.PanelListen) + "/"
+	fmt.Println(url)
+	opener := "xdg-open"
+	switch runtime.GOOS {
+	case "darwin":
+		opener = "open"
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	}
+	_ = exec.Command(opener, url).Start()
+	return nil
+}
+
+func printEnv() error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("export ANTHROPIC_BASE_URL=http://%s\n", dialAddr(cfg.Server.ProxyListen))
+	return nil
+}
+
+// ---- launch claude ---------------------------------------------------------
+
+func launch(args []string) error {
+	if err := start(false); err != nil {
+		return err
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	claude, err := exec.LookPath("claude")
+	if err != nil {
+		return fmt.Errorf("claude CLI not found in PATH")
+	}
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "ANTHROPIC_BASE_URL=") {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "ANTHROPIC_BASE_URL=http://"+dialAddr(cfg.Server.ProxyListen))
+
+	c := exec.Command(claude, args...)
+	c.Stdin, c.Stdout, c.Stderr, c.Env = os.Stdin, os.Stdout, os.Stderr, env
+	// Ctrl+C belongs to claude; we just wait for it to exit.
+	signal.Ignore(os.Interrupt)
+	return c.Run()
+}
+
+// ---- systemd ---------------------------------------------------------------
+
+const unitTemplate = `[Unit]
+Description=claude-hybrid router (proxy + web panel)
+After=network-online.target
+
+[Service]
+ExecStart=%s serve
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+`
+
+func installService() error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("install-service is Linux only; use 'claude-hybrid start' elsewhere")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	exe, _ = filepath.EvalSymlinks(exe)
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".config", "systemd", "user")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	unit := filepath.Join(dir, "claude-hybrid.service")
+	if err := os.WriteFile(unit, []byte(fmt.Sprintf(unitTemplate, exe)), 0o644); err != nil {
+		return err
+	}
+	// A background copy started by the launcher would hold the ports.
+	if b, err := os.ReadFile(pidPath()); err == nil {
+		if pid, _ := strconv.Atoi(strings.TrimSpace(string(b))); pid > 0 {
+			if p, err := os.FindProcess(pid); err == nil {
+				terminate(p)
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+	}
+	for _, a := range [][]string{{"daemon-reload"}, {"enable", "--now", "claude-hybrid"}, {"restart", "claude-hybrid"}} {
+		if out, err := exec.Command("systemctl", append([]string{"--user"}, a...)...).CombinedOutput(); err != nil {
+			return fmt.Errorf("systemctl --user %s: %v: %s", strings.Join(a, " "), err, out)
+		}
+	}
+	fmt.Println("installed", unit)
+	if cfg, err := loadConfig(); err == nil {
+		for i := 0; i < 30 && !healthy(cfg.Server.ProxyListen); i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	return status()
 }

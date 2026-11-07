@@ -1,249 +1,142 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"regexp"
 	"strings"
+
+	"github.com/sametakofficial/claude-hybrid-router/internal/agents"
+	"github.com/sametakofficial/claude-hybrid-router/internal/config"
 )
 
-// Matches both HTML-comment-wrapped and bare forms so the marker survives
-// markdown parsers that strip HTML comments (e.g. Claude Code's CLAUDE.md/agent loader).
-//
-// The proxy is a pure URL forwarder — it extracts only the URL. Any service
-// behind that URL (e.g. opencode-bridge) is responsible for parsing its own
-// metadata (agent name, etc.) from the request body.
-var routeMarkerRE = regexp.MustCompile(`(?:<!--\s*)?@proxy-local-route:af83e9\s+url=(https?://\S+?)(?:\s*-->)?(?:\s|$)`)
+// legacyRE matches the v1 marker, which carried the target URL directly.
+var legacyRE = regexp.MustCompile(`(?:<!--\s*)?@proxy-local-route:af83e9\s+url=(https?://[^\s>]+?)(?:\s*-->)?(?:\s|$)`)
 
-// RouteDirective holds the parsed fields from a routing marker.
-type RouteDirective struct {
-	Route string // destination base URL (e.g. "http://127.0.0.1:4568")
+// Decision is where one request goes.
+type Decision struct {
+	Source    string // "agent:NAME", "rule:N", "legacy" or ""
+	Route     config.Route
+	LegacyURL string // set for v1 markers: forward as-is to this Anthropic-compatible URL
+	Body      []byte // body to send (marker removed)
+	Changed   bool   // Body differs from the original request
 }
 
-// detectLocalRoute checks the system field of a JSON body for a routing marker.
-// Returns a RouteDirective and the body with the marker stripped, or a zero-value
-// RouteDirective and the original body.
-func detectLocalRoute(body []byte) (route RouteDirective, stripped []byte) {
-	if len(body) == 0 {
-		return RouteDirective{}, body
-	}
+// request is the parsed JSON body; numbers stay exact via UseNumber.
+type request map[string]any
 
-	var data map[string]interface{}
-	if err := json.Unmarshal(body, &data); err != nil {
-		return RouteDirective{}, body
+func parseRequest(body []byte) (request, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var r request
+	if err := dec.Decode(&r); err != nil {
+		return nil, err
 	}
-
-	// Check system field first (traditional placement).
-	if system, ok := data["system"]; ok && system != nil {
-		if route, stripped, found := scanSystemField(data, system); found {
-			return route, stripped
-		}
-	}
-
-	// Claude Code packages CLAUDE.md and agent markdown as a USER message
-	// with <system-reminder> blocks, so the marker lands in
-	// messages[].content[].text rather than the top-level system field.
-	// Scan every user message's text blocks as a fallback.
-	if messages, ok := data["messages"].([]interface{}); ok {
-		for _, msg := range messages {
-			mm, ok := msg.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if role, _ := mm["role"].(string); role != "user" {
-				continue
-			}
-			content := mm["content"]
-			switch c := content.(type) {
-			case string:
-				if m := routeMarkerRE.FindStringSubmatch(c); m != nil {
-					mm["content"] = strings.TrimSpace(routeMarkerRE.ReplaceAllString(c, ""))
-					out, _ := json.Marshal(data)
-					return RouteDirective{Route: m[1]}, out
-				}
-			case []interface{}:
-				for _, block := range c {
-					bm, ok := block.(map[string]interface{})
-					if !ok {
-						continue
-					}
-					text, ok := bm["text"].(string)
-					if !ok {
-						continue
-					}
-					if m := routeMarkerRE.FindStringSubmatch(text); m != nil {
-						bm["text"] = strings.TrimSpace(routeMarkerRE.ReplaceAllString(text, ""))
-						out, _ := json.Marshal(data)
-						return RouteDirective{Route: m[1]}, out
-					}
-				}
-			}
-		}
-	}
-
-	return RouteDirective{}, body
+	return r, nil
 }
 
-// scanSystemField checks the system field (string or block array) for the
-// routing marker. If found, strips the marker and returns the re-marshaled body.
-func scanSystemField(data map[string]interface{}, system interface{}) (RouteDirective, []byte, bool) {
-	switch s := system.(type) {
+func (r request) model() string { s, _ := r["model"].(string); return s }
+func (r request) stream() bool  { b, _ := r["stream"].(bool); return b }
+
+// systemTexts calls fn for every text in the system field and lets it replace the text.
+func (r request) editSystem(fn func(string) string) {
+	switch s := r["system"].(type) {
 	case string:
-		if m := routeMarkerRE.FindStringSubmatch(s); m != nil {
-			data["system"] = strings.TrimSpace(routeMarkerRE.ReplaceAllString(s, ""))
-			out, _ := json.Marshal(data)
-			return RouteDirective{Route: m[1]}, out, true
-		}
-	case []interface{}:
-		for _, block := range s {
-			bm, ok := block.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			text, ok := bm["text"].(string)
-			if !ok {
-				continue
-			}
-			if m := routeMarkerRE.FindStringSubmatch(text); m != nil {
-				bm["text"] = strings.TrimSpace(routeMarkerRE.ReplaceAllString(text, ""))
-				out, _ := json.Marshal(data)
-				return RouteDirective{Route: m[1]}, out, true
+		r["system"] = fn(s)
+	case []any:
+		for _, b := range s {
+			if m, ok := b.(map[string]any); ok {
+				if t, ok := m["text"].(string); ok {
+					m["text"] = fn(t)
+				}
 			}
 		}
 	}
-	return RouteDirective{}, nil, false
 }
 
-
-// sendLocalStub writes an Anthropic Messages API stub response.
-func sendLocalStub(w io.Writer, model string, streaming bool) {
-	stubText := fmt.Sprintf("[Local model '%s' request intercepted by proxy — no local provider configured yet]", model)
-	msgID := "msg_stub_local_route"
-
-	if streaming {
-		writeSSEStub(w, msgID, model, stubText)
-	} else {
-		writeJSONStub(w, msgID, model, stubText)
-	}
+// findMarkers looks for routing markers in the system field and removes them.
+// Only the system field is scanned: a marker inside a user message or tool
+// result (for example after reading an agent file) must not reroute the
+// main conversation.
+func (r request) findMarkers() (agent, legacyURL string, found bool) {
+	r.editSystem(func(t string) string {
+		if m := agents.MarkerRE.FindStringSubmatch(t); m != nil {
+			if agent == "" {
+				agent = m[1]
+			}
+			found = true
+			t = agents.MarkerRE.ReplaceAllString(t, "")
+		}
+		if m := legacyRE.FindStringSubmatch(t); m != nil {
+			if legacyURL == "" {
+				legacyURL = m[1]
+			}
+			found = true
+			t = legacyRE.ReplaceAllString(t, "")
+		}
+		if found {
+			t = strings.TrimSpace(t)
+		}
+		return t
+	})
+	return
 }
 
-func writeJSONStub(w io.Writer, msgID, model, stubText string) {
-	resp := map[string]interface{}{
-		"id":            msgID,
-		"type":          "message",
-		"role":          "assistant",
-		"content":       []map[string]string{{"type": "text", "text": stubText}},
-		"model":         model,
-		"stop_reason":   "end_turn",
-		"stop_sequence": nil,
-		"usage":         map[string]int{"input_tokens": 0, "output_tokens": 1},
+// decide picks the route for a request.
+func decide(cfg *config.Config, body []byte) (Decision, request, error) {
+	req, err := parseRequest(body)
+	if err != nil {
+		return Decision{Body: body}, nil, err
 	}
-	respBody, _ := json.Marshal(resp)
-	fmt.Fprintf(w, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", len(respBody))
-	w.Write(respBody)
+	d := Decision{Body: body}
+	agent, legacyURL, found := req.findMarkers()
+	if found {
+		out, err := json.Marshal(req)
+		if err != nil {
+			return d, req, err
+		}
+		d.Body, d.Changed = out, true
+	}
+	switch {
+	case agent != "":
+		d.Source = "agent:" + agent
+		d.Route = cfg.Agents[agent] // missing entry = Anthropic
+		return d, req, nil
+	case legacyURL != "":
+		d.Source = "legacy"
+		d.LegacyURL = legacyURL
+		return d, req, nil
+	}
+	model := req.model()
+	for i, rule := range cfg.Rules {
+		if rule.Matches(model) {
+			d.Source = fmt.Sprintf("rule:%d", i+1)
+			d.Route = rule.Route
+			return d, req, nil
+		}
+	}
+	return d, req, nil
 }
 
-func writeSSEStub(w io.Writer, msgID, model, stubText string) {
-	events := []struct {
-		event string
-		data  interface{}
-	}{
-		{"message_start", map[string]interface{}{
-			"type": "message_start",
-			"message": map[string]interface{}{
-				"id": msgID, "type": "message", "role": "assistant",
-				"content": []interface{}{}, "model": model,
-				"stop_reason": nil, "stop_sequence": nil,
-				"usage": map[string]int{"input_tokens": 0, "output_tokens": 0},
-			},
-		}},
-		{"content_block_start", map[string]interface{}{
-			"type": "content_block_start", "index": 0,
-			"content_block": map[string]string{"type": "text", "text": ""},
-		}},
-		{"content_block_delta", map[string]interface{}{
-			"type": "content_block_delta", "index": 0,
-			"delta": map[string]string{"type": "text_delta", "text": stubText},
-		}},
-		{"content_block_stop", map[string]interface{}{
-			"type": "content_block_stop", "index": 0,
-		}},
-		{"message_delta", map[string]interface{}{
-			"type":  "message_delta",
-			"delta": map[string]interface{}{"stop_reason": "end_turn", "stop_sequence": nil},
-			"usage": map[string]int{"output_tokens": 1},
-		}},
-		{"message_stop", map[string]interface{}{
-			"type": "message_stop",
-		}},
-	}
-
-	var sseBody []byte
-	for _, ev := range events {
-		data, _ := json.Marshal(ev.data)
-		sseBody = append(sseBody, []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", ev.event, data))...)
-	}
-
-	fmt.Fprintf(w, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: %d\r\n\r\n", len(sseBody))
-	w.Write(sseBody)
-}
-
-// writeJSONStubToWriter writes a stub JSON response through an io.Writer
-// (used by the reverse proxy path where we have an http.ResponseWriter).
-func writeJSONStubToWriter(w io.Writer, msgID, model, stubText string) {
-	resp := map[string]interface{}{
-		"id":            msgID,
-		"type":          "message",
-		"role":          "assistant",
-		"content":       []map[string]string{{"type": "text", "text": stubText}},
-		"model":         model,
-		"stop_reason":   "end_turn",
-		"stop_sequence": nil,
-		"usage":         map[string]int{"input_tokens": 0, "output_tokens": 1},
-	}
-	respBody, _ := json.Marshal(resp)
-	w.Write(respBody)
-}
-
-// writeSSEStubToWriter writes a stub SSE response through an io.Writer.
-func writeSSEStubToWriter(w io.Writer, msgID, model, stubText string) {
-	events := []struct {
-		event string
-		data  interface{}
-	}{
-		{"message_start", map[string]interface{}{
-			"type": "message_start",
-			"message": map[string]interface{}{
-				"id": msgID, "type": "message", "role": "assistant",
-				"content": []interface{}{}, "model": model,
-				"stop_reason": nil, "stop_sequence": nil,
-				"usage": map[string]int{"input_tokens": 0, "output_tokens": 0},
-			},
-		}},
-		{"content_block_start", map[string]interface{}{
-			"type": "content_block_start", "index": 0,
-			"content_block": map[string]string{"type": "text", "text": ""},
-		}},
-		{"content_block_delta", map[string]interface{}{
-			"type": "content_block_delta", "index": 0,
-			"delta": map[string]string{"type": "text_delta", "text": stubText},
-		}},
-		{"content_block_stop", map[string]interface{}{
-			"type": "content_block_stop", "index": 0,
-		}},
-		{"message_delta", map[string]interface{}{
-			"type":  "message_delta",
-			"delta": map[string]interface{}{"stop_reason": "end_turn", "stop_sequence": nil},
-			"usage": map[string]int{"output_tokens": 1},
-		}},
-		{"message_stop", map[string]interface{}{
-			"type": "message_stop",
-		}},
-	}
-
-	for _, ev := range events {
-		data, _ := json.Marshal(ev.data)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.event, data)
+// applyRoute adjusts the request for a non-Anthropic target: system prompt
+// mode and the overrides that are shared by every provider type.
+func applyRoute(req request, rt config.Route) {
+	switch rt.SystemMode {
+	case config.SystemReplace:
+		req["system"] = []any{map[string]any{"type": "text", "text": rt.SystemPrompt}}
+	case config.SystemAppend:
+		if rt.SystemPrompt == "" {
+			break
+		}
+		block := map[string]any{"type": "text", "text": rt.SystemPrompt}
+		switch s := req["system"].(type) {
+		case string:
+			req["system"] = []any{map[string]any{"type": "text", "text": s}, block}
+		case []any:
+			req["system"] = append(s, block)
+		default:
+			req["system"] = []any{block}
+		}
 	}
 }

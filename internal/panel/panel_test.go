@@ -1,0 +1,117 @@
+package panel
+
+import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sametakofficial/claude-hybrid-router/internal/config"
+	"github.com/sametakofficial/claude-hybrid-router/internal/proxy"
+	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
+)
+
+func setup(t *testing.T) (*Panel, http.Handler, string) {
+	t.Setenv("CLAUDE_HYBRID_HOME", t.TempDir())
+	st, err := config.Open(filepath.Join(config.Home(), "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentsDir := filepath.Join(config.Home(), "agents")
+	st.Update(func(c *config.Config) error {
+		c.Server.AgentsDir = agentsDir
+		c.Providers = []config.Provider{{ID: "gpt", Type: "openai", BaseURL: "https://x/v1", APIKey: "sk-secret-123456789", Enabled: true}}
+		return nil
+	})
+	rec := stats.New(10, nil)
+	p := &Panel{Store: st, Rec: rec, Proxy: proxy.New(st.Current, rec), Started: time.Now()}
+	return p, p.Handler(), agentsDir
+}
+
+func do(h http.Handler, method, path, body string, hdr map[string]string) (int, string) {
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.Host = "127.0.0.1:3458"
+	r.Header.Set("X-CHR", "1")
+	for k, v := range hdr {
+		if k == "Host" {
+			r.Host = v
+		} else if v == "" {
+			r.Header.Del(k)
+		} else {
+			r.Header.Set(k, v)
+		}
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	b, _ := io.ReadAll(w.Body)
+	return w.Code, string(b)
+}
+
+func TestGuard(t *testing.T) {
+	_, h, _ := setup(t)
+	if code, _ := do(h, "GET", "/api/status", "", map[string]string{"X-CHR": ""}); code != 403 {
+		t.Fatalf("missing X-CHR: %d", code)
+	}
+	if code, _ := do(h, "GET", "/api/status", "", map[string]string{"Host": "evil.example:3458"}); code != 403 {
+		t.Fatalf("non-loopback host: %d", code)
+	}
+	if code, _ := do(h, "GET", "/", "", nil); code != 200 {
+		t.Fatalf("index: %d", code)
+	}
+}
+
+func TestKeysAreMaskedAndKept(t *testing.T) {
+	p, h, _ := setup(t)
+	_, out := do(h, "GET", "/api/providers", "", nil)
+	if strings.Contains(out, "secret") || !strings.Contains(out, `"has_api_key":true`) {
+		t.Fatalf("key leaked or missing: %s", out)
+	}
+	code, out := do(h, "PUT", "/api/providers/gpt", `{"name":"GPT","type":"openai","base_url":"https://y/v1","api_key":"sk-…6789","enabled":true}`, nil)
+	if code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	if pr, _ := p.Store.Get().Provider("gpt"); pr.APIKey != "sk-secret-123456789" || pr.BaseURL != "https://y/v1" {
+		t.Fatalf("masked key must keep the stored key: %+v", pr)
+	}
+	_, raw := do(h, "GET", "/api/config/raw", "", nil)
+	if strings.Contains(raw, "secret") {
+		t.Fatal("raw config leaks key")
+	}
+}
+
+func TestAgentLifecycle(t *testing.T) {
+	p, h, dir := setup(t)
+	code, out := do(h, "PUT", "/api/agents/coder", `{"name":"coder","description":"Writes code","prompt":"You code.","route":{"provider":"gpt","model":"gpt-5","system_mode":"keep"}}`, nil)
+	if code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "coder.md"))
+	if !strings.Contains(string(data), "<!-- claude-hybrid:agent=coder -->") {
+		t.Fatalf("marker missing:\n%s", data)
+	}
+	if rt := p.Store.Get().Agents["coder"]; rt.Model != "gpt-5" {
+		t.Fatalf("route not saved: %+v", rt)
+	}
+	// rename + switch back to Anthropic
+	code, out = do(h, "PUT", "/api/agents/coder", `{"name":"coder2","description":"Writes code","prompt":"You code.","route":{"provider":""}}`, nil)
+	if code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	if _, ok := p.Store.Get().Agents["coder"]; ok || len(p.Store.Get().Agents) != 0 {
+		t.Fatal("old route should be gone")
+	}
+	if code, out := do(h, "DELETE", "/api/providers/gpt", "", nil); code != 200 {
+		t.Fatalf("unused provider should delete: %d %s", code, out)
+	}
+	code, out = do(h, "DELETE", "/api/agents/coder2", "", nil)
+	if code != 200 || !strings.Contains(out, "trash") {
+		t.Fatalf("%d %s", code, out)
+	}
+	if code, _ := do(h, "PUT", "/api/agents/..%2fevil", `{"name":"../evil","description":"x"}`, nil); code != 400 {
+		t.Fatalf("path traversal must be rejected, got %d", code)
+	}
+}

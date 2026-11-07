@@ -1,331 +1,277 @@
 package proxy
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
-	"fmt"
 	"io"
-	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
-	"github.com/peter-wagstaff/claude-hybrid-router/internal/testutil"
+	"github.com/sametakofficial/claude-hybrid-router/internal/config"
+	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
 )
 
-func TestCleanRequestForwarded(t *testing.T) {
-	infra := setupInfra(t, nil)
-
-	body, _ := json.Marshal(map[string]interface{}{
-		"messages": []map[string]string{{"role": "user", "content": "hello world"}},
-	})
-	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
-	if status != 200 {
-		t.Fatalf("expected 200, got %d", status)
-	}
-
-	var echo testutil.EchoResponse
-	if err := json.Unmarshal([]byte(respBody), &echo); err != nil {
-		t.Fatalf("parse echo response: %v\nbody: %s", err, respBody)
-	}
-	if echo.Method != "POST" {
-		t.Errorf("expected POST, got %s", echo.Method)
-	}
-	if !strings.Contains(echo.Body, "hello world") {
-		t.Error("request body not forwarded")
-	}
+type captured struct {
+	mu     sync.Mutex
+	hits   int
+	path   string
+	header http.Header
+	body   string
 }
 
-func TestGetRequestNoBody(t *testing.T) {
-	infra := setupInfra(t, nil)
-
-	status, respBody, _ := proxyRequest(t, infra, "GET", "/v1/models", nil, nil)
-	if status != 200 {
-		t.Fatalf("expected 200, got %d", status)
-	}
-
-	var echo testutil.EchoResponse
-	json.Unmarshal([]byte(respBody), &echo)
-	if echo.Method != "GET" {
-		t.Errorf("expected GET, got %s", echo.Method)
-	}
+func (c *captured) record(r *http.Request) {
+	b, _ := io.ReadAll(r.Body)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.hits++
+	c.path, c.header, c.body = r.URL.Path, r.Header.Clone(), string(b)
 }
 
-func TestMultipleRequestsSingleTunnel(t *testing.T) {
-	infra := setupInfra(t, nil)
-	targetHost := "localhost"
-	targetPort := infra.upstreamPort
+type env struct {
+	t        *testing.T
+	proxy    *httptest.Server
+	upstream *captured
+	openai   *captured
+	anth     *captured
+	rec      *stats.Recorder
+	cfg      *config.Config
 
-	conn, err := net.Dial("tcp", infra.proxyAddr)
+	openaiStatus int
+}
+
+func newEnv(t *testing.T) *env {
+	e := &env{t: t, upstream: &captured{}, openai: &captured{}, anth: &captured{}, openaiStatus: 200}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		e.upstream.record(r)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"type":"message","content":[{"type":"text","text":"from anthropic"}],"usage":{"input_tokens":3,"cache_read_input_tokens":2,"output_tokens":4}}`)
+	}))
+	oa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		e.openai.record(r)
+		if e.openaiStatus != 200 {
+			w.WriteHeader(e.openaiStatus)
+			io.WriteString(w, `{"error":{"message":"bad key sk-abcdefghijklmnop"}}`)
+			return
+		}
+		var req map[string]any
+		json.Unmarshal([]byte(e.openai.body), &req)
+		if req["stream"] == true {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi from gpt\"}}]}\n\n")
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, `{"id":"x","choices":[{"message":{"content":"hi from gpt"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":2}}`)
+	}))
+	an := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		e.anth.record(r)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"type":"message","content":[{"type":"text","text":"from glm"}],"usage":{"input_tokens":5,"output_tokens":6}}`)
+	}))
+	t.Cleanup(func() { up.Close(); oa.Close(); an.Close() })
+
+	e.cfg = config.Default()
+	e.cfg.Server.Upstream = up.URL
+	e.cfg.Providers = []config.Provider{
+		{ID: "gpt", Type: config.TypeOpenAI, BaseURL: oa.URL + "/v1", APIKey: "sk-provider", Enabled: true},
+		{ID: "glm", Type: config.TypeAnthropic, BaseURL: an.URL, APIKey: "glm-key", Enabled: true},
+		{ID: "off", Type: config.TypeOpenAI, BaseURL: oa.URL, Enabled: false},
+	}
+	e.cfg.Agents = map[string]config.Route{
+		"coder":  {Provider: "gpt", Model: "gpt-5", SystemMode: config.SystemAppend, SystemPrompt: "EXTRA"},
+		"broken": {Provider: "off"},
+	}
+	e.cfg.Rules = []config.Rule{{Match: "claude-haiku-*", Enabled: true, Route: config.Route{Provider: "glm", Model: "glm-4.6"}}}
+	if err := e.cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	e.rec = stats.New(100, nil)
+	e.proxy = httptest.NewServer(New(func() *config.Config { return e.cfg }, e.rec))
+	t.Cleanup(e.proxy.Close)
+	return e
+}
+
+func (e *env) post(path, body string) (*http.Response, string) {
+	e.t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, e.proxy.URL+path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer oauth-subscription-token")
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("connect: %v", err)
+		e.t.Fatal(err)
 	}
-	defer conn.Close()
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp, string(b)
+}
 
-	connectReq := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s\r\n\r\n",
-		targetHost, targetPort, targetHost)
-	conn.Write([]byte(connectReq))
-
-	buf := make([]byte, 4096)
-	n, _ := conn.Read(buf)
-	if !strings.Contains(string(buf[:n]), "200") {
-		t.Fatalf("CONNECT failed")
+// entries waits for the log entries: they are written right after the
+// response body is finished, so a fast client can get there first.
+func (e *env) entries(n int) []stats.Entry {
+	for i := 0; i < 100; i++ {
+		if got := e.rec.Since(0); len(got) >= n {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+	return e.rec.Since(0)
+}
 
-	mitmPool := x509.NewCertPool()
-	mitmPool.AppendCertsFromPEM(infra.mitmCACert)
-	tlsConn := tls.Client(conn, &tls.Config{
-		RootCAs:    mitmPool,
-		ServerName: targetHost,
-	})
-	tlsConn.Handshake()
+const marker = "<!-- claude-hybrid:agent=coder -->"
 
-	for i := range 3 {
-		body, _ := json.Marshal(map[string]interface{}{
-			"messages": []map[string]string{{"role": "user", "content": fmt.Sprintf("request %d", i)}},
-		})
-
-		req := fmt.Sprintf("POST /v1/messages HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n\r\n",
-			targetHost, len(body))
-		tlsConn.Write([]byte(req))
-		tlsConn.Write(body)
-
-		// Read response headers
-		respBuf := make([]byte, 0, 8192)
-		tmp := make([]byte, 4096)
-		for !strings.Contains(string(respBuf), "\r\n\r\n") {
-			n, err := tlsConn.Read(tmp)
-			if err != nil {
-				t.Fatalf("read response %d: %v", i, err)
-			}
-			respBuf = append(respBuf, tmp[:n]...)
-		}
-
-		headerEnd := strings.Index(string(respBuf), "\r\n\r\n")
-		headers := string(respBuf[:headerEnd])
-		after := respBuf[headerEnd+4:]
-
-		if !strings.Contains(strings.SplitN(headers, "\r\n", 2)[0], "200") {
-			t.Fatalf("request %d: non-200 response", i)
-		}
-
-		// Find Content-Length
-		var cl int
-		for _, line := range strings.Split(headers, "\r\n") {
-			if strings.HasPrefix(strings.ToLower(line), "content-length:") {
-				fmt.Sscanf(strings.TrimSpace(strings.SplitN(line, ":", 2)[1]), "%d", &cl)
-			}
-		}
-
-		// Read remaining body
-		for len(after) < cl {
-			n, err := tlsConn.Read(tmp)
-			if err != nil {
-				t.Fatalf("read body %d: %v", i, err)
-			}
-			after = append(after, tmp[:n]...)
-		}
-
-		var echo testutil.EchoResponse
-		if err := json.Unmarshal(after[:cl], &echo); err != nil {
-			t.Fatalf("parse response %d: %v", i, err)
-		}
-		if echo.Method != "POST" {
-			t.Errorf("request %d: expected POST", i)
-		}
-		if !strings.Contains(echo.Body, fmt.Sprintf("request %d", i)) {
-			t.Errorf("request %d: body not forwarded", i)
-		}
+func TestPlainRequestGoesToAnthropicUnchanged(t *testing.T) {
+	e := newEnv(t)
+	body := `{"model":"claude-opus","max_tokens":10,"system":"You are Claude Code","messages":[{"role":"user","content":"hi"}]}`
+	resp, out := e.post("/v1/messages?beta=true", body)
+	if resp.StatusCode != 200 || !strings.Contains(out, "from anthropic") {
+		t.Fatalf("got %d %s", resp.StatusCode, out)
+	}
+	if e.upstream.body != body {
+		t.Fatalf("body must be byte-identical:\n%s", e.upstream.body)
+	}
+	if e.upstream.header.Get("Authorization") != "Bearer oauth-subscription-token" {
+		t.Fatal("subscription auth must reach Anthropic")
+	}
+	if e.openai.hits+e.anth.hits != 0 {
+		t.Fatal("providers must not be hit")
+	}
+	e.entries(1)
+	if s := e.rec.Summary(); s.Requests != 1 || s.Targets[0].InputTokens != 5 || s.Targets[0].OutputTokens != 4 {
+		t.Fatalf("stats: %+v", s)
 	}
 }
 
-func TestLocalRouteDetected(t *testing.T) {
-	infra := setupInfra(t, nil)
-
-	body, _ := json.Marshal(map[string]interface{}{
-		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:9999 --> You are helpful",
-		"messages": []map[string]string{{"role": "user", "content": "hello"}},
-	})
-	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
-	if status != 200 {
-		t.Fatalf("expected 200, got %d", status)
+func TestAgentMarkerRoutesToOpenAIStreaming(t *testing.T) {
+	e := newEnv(t)
+	body := `{"model":"claude-sonnet","max_tokens":10,"stream":true,"system":[{"type":"text","text":"base"},{"type":"text","text":"` + strings.ReplaceAll(marker, `"`, `\"`) + `\nYou are coder"}],"messages":[{"role":"user","content":"hi"}]}`
+	resp, out := e.post("/v1/messages", body)
+	if resp.StatusCode != 200 || !strings.Contains(out, "event: message_start") || !strings.Contains(out, "hi from gpt") {
+		t.Fatalf("got %d %s", resp.StatusCode, out)
 	}
-
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(respBody), &data); err != nil {
-		t.Fatalf("parse response: %v", err)
+	if !strings.Contains(out, `"model":"claude-sonnet"`) {
+		t.Fatal("reply should keep the requested model name")
 	}
-	if data["type"] != "message" {
-		t.Error("unexpected type")
+	if e.upstream.hits != 0 {
+		t.Fatal("anthropic must not be hit")
 	}
-	if data["role"] != "assistant" {
-		t.Error("unexpected role")
+	if got := e.openai.header.Get("Authorization"); got != "Bearer sk-provider" {
+		t.Fatalf("provider auth = %q", got)
 	}
-	if data["model"] != "http://127.0.0.1:9999" {
-		t.Errorf("unexpected model: %v", data["model"])
+	if strings.Contains(e.openai.body, "claude-hybrid:agent") || strings.Contains(e.openai.body, "oauth") {
+		t.Fatalf("marker/token leaked: %s", e.openai.body)
 	}
-	content := data["content"].([]interface{})[0].(map[string]interface{})
-	text := content["text"].(string)
-	if !strings.Contains(text, "http://127.0.0.1:9999") {
-		t.Error("stub text missing model URL")
+	if !strings.Contains(e.openai.body, `"model":"gpt-5"`) || !strings.Contains(e.openai.body, "EXTRA") || !strings.Contains(e.openai.body, "You are coder") {
+		t.Fatalf("route options not applied: %s", e.openai.body)
 	}
-	if !strings.Contains(text, "no local provider configured") {
-		t.Error("stub text missing message")
+	got := e.entries(1)
+	if len(got) != 1 || got[0].Source != "agent:coder" || got[0].InputTokens != 11 || got[0].Status != 200 {
+		t.Fatalf("log entry: %+v", got)
 	}
 }
 
-func TestLocalRouteStreaming(t *testing.T) {
-	infra := setupInfra(t, nil)
-
-	body, _ := json.Marshal(map[string]interface{}{
-		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:9999 --> You are helpful",
-		"messages": []map[string]string{{"role": "user", "content": "hello"}},
-		"stream":   true,
-	})
-	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
-	if status != 200 {
-		t.Fatalf("expected 200, got %d", status)
-	}
-
-	assertSSELifecycle(t, respBody)
-	if !strings.Contains(respBody, "http://127.0.0.1:9999") {
-		t.Error("missing model URL in SSE")
-	}
-	if !strings.Contains(respBody, "no local provider configured") {
-		t.Error("missing stub text in SSE")
+func TestAgentMarkerNonStreaming(t *testing.T) {
+	e := newEnv(t)
+	body := `{"model":"claude-sonnet","max_tokens":10,"system":"` + strings.ReplaceAll(marker, `"`, `\"`) + `","messages":[{"role":"user","content":"hi"}]}`
+	resp, out := e.post("/v1/messages", body)
+	var m map[string]any
+	json.Unmarshal([]byte(out), &m)
+	if resp.StatusCode != 200 || m["type"] != "message" || !strings.Contains(out, "hi from gpt") {
+		t.Fatalf("got %d %s", resp.StatusCode, out)
 	}
 }
 
-func TestLocalRouteMarkerStripped(t *testing.T) {
-	infra := setupInfra(t, nil)
-
-	body, _ := json.Marshal(map[string]interface{}{
-		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:9999 --> You are helpful",
-		"messages": []map[string]string{{"role": "user", "content": "hello"}},
-	})
-	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
-	if status != 200 {
-		t.Fatalf("expected 200, got %d", status)
+func TestUnroutedAgentGoesToAnthropicWithoutMarker(t *testing.T) {
+	e := newEnv(t)
+	body := `{"model":"claude-sonnet","system":"<!-- claude-hybrid:agent=plain -->\nYou are plain","messages":[{"role":"user","content":"hi"}]}`
+	e.post("/v1/messages", body)
+	if e.upstream.hits != 1 || strings.Contains(e.upstream.body, "claude-hybrid:agent") || !strings.Contains(e.upstream.body, "You are plain") {
+		t.Fatalf("upstream body: %s", e.upstream.body)
 	}
-	if strings.Contains(respBody, "@proxy-local-route") {
-		t.Error("marker should be stripped from response")
+	if e.entries(1)[0].Source != "agent:plain" {
+		t.Fatal("source should name the agent")
 	}
 }
 
-// TestMarkerInMessagesIsRouted verifies that markers inside user messages
-// ARE routed locally. Claude Code packages CLAUDE.md content as
-// <system-reminder> blocks inside user messages (not in the top-level
-// `system` field), so the proxy must pick up markers there too.
-// With no routeResolver configured, forwardLocal returns the local-stub
-// response whose body contains the intercept notice — its presence
-// proves routing happened and the request never hit the upstream echo.
-func TestMarkerInMessagesIsRouted(t *testing.T) {
-	infra := setupInfra(t, nil)
-
-	body, _ := json.Marshal(map[string]interface{}{
-		"messages": []map[string]string{{
-			"role":    "user",
-			"content": "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:9999 --> hello",
-		}},
-	})
-	status, respBody, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, nil)
-	if status != 200 {
-		t.Fatalf("expected 200 stub response, got %d: %s", status, respBody)
-	}
-	if !strings.Contains(respBody, "intercepted by proxy") {
-		t.Errorf("expected local stub response, got: %s", respBody)
+func TestMarkerInUserMessageIsIgnored(t *testing.T) {
+	e := newEnv(t)
+	body := `{"model":"claude-opus","system":"main","messages":[{"role":"user","content":[{"type":"text","text":"` + strings.ReplaceAll(marker, `"`, `\"`) + `"}]}]}`
+	e.post("/v1/messages", body)
+	if e.upstream.hits != 1 || e.openai.hits != 0 {
+		t.Fatal("marker outside system must not reroute")
 	}
 }
 
-func TestAuthHeadersNotLogged(t *testing.T) {
-	// This test verifies the code path works — the actual log sanitization
-	// is verified by inspecting the log filter in the handler.
-	infra := setupInfra(t, nil)
-
-	body, _ := json.Marshal(map[string]interface{}{
-		"model":    "claude-sonnet-4-20250514",
-		"system":   "<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:9999 --> You are helpful",
-		"messages": []map[string]string{{"role": "user", "content": "hello"}},
-	})
-	status, _, _ := proxyRequest(t, infra, "POST", "/v1/messages", body, map[string]string{
-		"x-api-key":     "sk-secret-key-12345",
-		"authorization": "Bearer secret-token",
-	})
-	if status != 200 {
-		t.Fatalf("expected 200, got %d", status)
+func TestRuleRoutesToAnthropicProvider(t *testing.T) {
+	e := newEnv(t)
+	resp, out := e.post("/v1/messages", `{"model":"claude-haiku-4","max_tokens":50,"messages":[{"role":"user","content":"title"}]}`)
+	if resp.StatusCode != 200 || !strings.Contains(out, "from glm") {
+		t.Fatalf("got %d %s", resp.StatusCode, out)
+	}
+	h := e.anth.header
+	if h.Get("x-api-key") != "glm-key" || strings.Contains(h.Get("Authorization"), "oauth") || h.Get("anthropic-beta") != "" {
+		t.Fatalf("provider headers: %v", h)
+	}
+	if e.anth.path != "/v1/messages" || !strings.Contains(e.anth.body, `"model":"glm-4.6"`) {
+		t.Fatalf("path %s body %s", e.anth.path, e.anth.body)
+	}
+	if got := e.entries(1)[0]; got.Source != "rule:1" || got.OutputTokens != 6 {
+		t.Fatalf("entry %+v", got)
 	}
 }
 
-func TestUpstreamUnreachable(t *testing.T) {
-	infra := setupInfra(t, nil)
-
-	// Dial proxy directly and CONNECT to a dead port (port 1)
-	conn, err := net.Dial("tcp", infra.proxyAddr)
-	if err != nil {
-		t.Fatalf("connect to proxy: %v", err)
+func TestProviderAuthErrorIsNotPassedAs401(t *testing.T) {
+	e := newEnv(t)
+	e.openaiStatus = 401
+	resp, out := e.post("/v1/messages", `{"model":"m","system":"`+strings.ReplaceAll(marker, `"`, `\"`)+`","messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != 400 {
+		t.Fatalf("status %d", resp.StatusCode)
 	}
-	defer conn.Close()
-
-	fmt.Fprintf(conn, "CONNECT localhost:1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
-
-	buf := make([]byte, 4096)
-	n, _ := conn.Read(buf)
-	resp := string(buf[:n])
-
-	// The proxy should return 200 for CONNECT (the TLS handshake will fail or the upstream will be unreachable)
-	// Since CONNECT succeeds but the upstream is dead, we need to do a TLS handshake and then the request should fail
-	if !strings.Contains(resp, "200") {
-		// If the proxy immediately rejects with a non-200, that's also valid behavior
-		// for an unreachable target — check for 502
-		if !strings.Contains(resp, "502") {
-			t.Fatalf("expected 200 or 502, got: %s", resp)
-		}
-		return // 502 is valid — test passes
-	}
-
-	// If we got 200, try a TLS handshake + request — it should fail
-	mitmPool := x509.NewCertPool()
-	mitmPool.AppendCertsFromPEM(infra.mitmCACert)
-	tlsConn := tls.Client(conn, &tls.Config{
-		RootCAs:    mitmPool,
-		ServerName: "localhost",
-	})
-	if err := tlsConn.Handshake(); err != nil {
-		// TLS handshake failure to dead port is expected
-		return
-	}
-
-	req := "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-	tlsConn.Write([]byte(req))
-	respData, _ := io.ReadAll(tlsConn)
-	respStr := string(respData)
-
-	// Should get a 502 or connection error
-	if len(respStr) > 0 && !strings.Contains(respStr, "502") {
-		t.Logf("response from dead upstream: %s", respStr)
+	if !strings.Contains(out, `"type":"error"`) || strings.Contains(out, "abcdefghijklmnop") {
+		t.Fatalf("error body should be Anthropic-shaped and redacted: %s", out)
 	}
 }
 
-func TestNonConnectMethodRejected(t *testing.T) {
-	infra := setupInfra(t, nil)
-
-	conn, err := net.Dial("tcp", infra.proxyAddr)
-	if err != nil {
-		t.Fatalf("connect to proxy: %v", err)
+func TestDisabledProvider(t *testing.T) {
+	e := newEnv(t)
+	resp, out := e.post("/v1/messages", `{"model":"m","system":"<!-- claude-hybrid:agent=broken -->","messages":[]}`)
+	if resp.StatusCode != 400 || !strings.Contains(out, "disabled") {
+		t.Fatalf("got %d %s", resp.StatusCode, out)
 	}
-	defer conn.Close()
+}
 
-	// Send a GET (not CONNECT) directly to the proxy
-	fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+func TestCountTokensForOpenAIRouteIsEstimated(t *testing.T) {
+	e := newEnv(t)
+	resp, out := e.post("/v1/messages/count_tokens", `{"model":"m","system":"`+strings.ReplaceAll(marker, `"`, `\"`)+`","messages":[{"role":"user","content":"hello there"}]}`)
+	if resp.StatusCode != 200 || !strings.Contains(out, "input_tokens") || e.openai.hits != 0 {
+		t.Fatalf("got %d %s", resp.StatusCode, out)
+	}
+	if len(e.rec.Since(0)) != 0 {
+		t.Fatal("count_tokens should not be logged")
+	}
+}
 
-	buf := make([]byte, 4096)
-	n, _ := conn.Read(buf)
-	resp := string(buf[:n])
+func TestOtherRequestsPassThrough(t *testing.T) {
+	e := newEnv(t)
+	resp, err := http.Get(e.proxy.URL + "/api/hello")
+	if err != nil || resp.StatusCode != 200 || e.upstream.path != "/api/hello" {
+		t.Fatalf("GET passthrough failed: %v %v", err, e.upstream.path)
+	}
+	resp, _ = http.Get(e.proxy.URL + HealthPath)
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), "claude-hybrid") {
+		t.Fatal("health")
+	}
+}
 
-	if !strings.Contains(resp, "405") {
-		t.Errorf("expected 405 Method Not Allowed, got: %s", resp)
+func TestLegacyMarker(t *testing.T) {
+	e := newEnv(t)
+	base := strings.TrimSuffix(e.cfg.Providers[1].BaseURL, "/")
+	e.post("/v1/messages", `{"model":"m","system":"<!-- @proxy-local-route:af83e9 url=`+base+` -->","messages":[]}`)
+	if e.anth.hits != 1 || strings.Contains(e.anth.body, "proxy-local-route") {
+		t.Fatalf("legacy marker: hits=%d body=%s", e.anth.hits, e.anth.body)
 	}
 }

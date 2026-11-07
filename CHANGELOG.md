@@ -1,26 +1,23 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+## 2.0.0
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Rewrite.
 
-## [Unreleased]
-
-### Added
-- MITM CONNECT proxy with per-domain certificate generation and LRU cache
-- Routing marker detection in system field (`<!-- @proxy-local-route:af83e9 url=BASE_URL -->`)
-- Base URL forwarding to local/alternative model providers
-- MITM bypass list for package managers, OAuth, and GitHub
-- CA trust management (`claude-hybrid trust install|status`) for Linux, macOS, and Windows
-- Combined CA bundle creation (system roots + MITM CA)
-- Windows PATH resolution to avoid Desktop app shadowing the CLI binary
-- Structured Anthropic-format error responses for local provider failures
-- API key redaction in all log output
-- Multi-instance safety with lock files and shared CA certs
-- Graceful shutdown with 5-second timeout for in-flight requests
-- Daily log rotation with flock-based locking
-- opencode-bridge provider: Anthropic-API server delegating to opencode CLI
-- Per-agent session ID cache for opencode-bridge
-- Cross-platform builds (Linux, macOS, Windows) via goreleaser
-- GitHub Actions CI (test matrix) and CD (tag-triggered releases)
+- Web panel (http://127.0.0.1:3458) to manage providers, subagents (name,
+  description, tools, model, color, system prompt) and their routes, model
+  rules, settings, raw config, and a live request log with token counts.
+- Built-in Anthropic ⇄ OpenAI Chat Completions translation (tools, images,
+  streaming, usage). The musistudio Docker sidecar is no longer needed.
+- Anthropic-compatible providers are forwarded directly with model,
+  max_tokens and temperature overrides.
+- Per-route system prompt mode (keep / append / replace) and reasoning effort.
+- Routing by agent name (`<!-- claude-hybrid:agent=NAME -->`); the target
+  lives in the config. The v1 URL marker still works.
+- Model rules (glob on the requested model) for non-agent traffic.
+- The router runs as one background service (`claude-hybrid serve`,
+  `install-service` for systemd); `claude-hybrid` launches claude through it.
+- Removed: MITM proxy, root CA generation and trust-store install, CA
+  bundles, proxy env vars.
+- Subscription token is never forwarded to providers; provider 401/403 are
+  reported as 400 so Claude Code does not ask you to log in again.

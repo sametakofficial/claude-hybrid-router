@@ -1,0 +1,976 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-hybrid</title>
+<style>
+:root{
+  --bg:#f6f7f9;--panel:#fff;--panel2:#f1f3f6;--fg:#1b1f24;--muted:#69717d;--line:#dfe3e8;
+  --accent:#c2652a;--accent-fg:#fff;--accent-soft:#f8e9df;
+  --ok:#1f8a4c;--ok-soft:#e1f4e8;--warn:#a66a00;--warn-soft:#fbf0d9;--err:#c4322b;--err-soft:#fbe4e2;
+  --info:#2f63c4;--info-soft:#e3ebfa;--shadow:0 1px 2px rgba(0,0,0,.05),0 4px 14px rgba(0,0,0,.05);
+  --r:10px;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#121417;--panel:#1a1d21;--panel2:#22262b;--fg:#e6e8eb;--muted:#959ca6;--line:#2e3339;
+    --accent:#e08249;--accent-fg:#1a1208;--accent-soft:#3a2618;
+    --ok:#4cc27c;--ok-soft:#173323;--warn:#e0a83a;--warn-soft:#3a2c12;--err:#ef6b63;--err-soft:#3d1a18;
+    --info:#7aa5f0;--info-soft:#1a2740;--shadow:0 1px 2px rgba(0,0,0,.4);color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#121417;--panel:#1a1d21;--panel2:#22262b;--fg:#e6e8eb;--muted:#959ca6;--line:#2e3339;
+  --accent:#e08249;--accent-fg:#1a1208;--accent-soft:#3a2618;
+  --ok:#4cc27c;--ok-soft:#173323;--warn:#e0a83a;--warn-soft:#3a2c12;--err:#ef6b63;--err-soft:#3d1a18;
+  --info:#7aa5f0;--info-soft:#1a2740;--shadow:0 1px 2px rgba(0,0,0,.4);color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg)}
+body{font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,sans-serif;min-height:100vh}
+a{color:var(--accent)}
+code,pre,.mono{font-family:var(--mono);font-size:12.5px}
+code{background:var(--panel2);padding:1px 5px;border-radius:5px}
+h2{font-size:18px;margin:0}h3{font-size:16px;margin:0}h4{font-size:13px;margin:18px 0 8px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.brand b{font-size:15px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted);display:inline-block;flex:none}
+.dot.on{background:var(--ok)}.dot.off{background:var(--err)}
+nav#tabs{display:flex;gap:2px;overflow-x:auto;flex:1;scrollbar-width:none}
+nav#tabs::-webkit-scrollbar{display:none}
+nav#tabs a{padding:6px 10px;border-radius:7px;color:var(--muted);text-decoration:none;white-space:nowrap;font-weight:500}
+nav#tabs a:hover{background:var(--panel2);color:var(--fg)}
+nav#tabs a.active{background:var(--accent-soft);color:var(--accent)}
+.actions{display:flex;gap:4px}
+main{max-width:1180px;margin:0 auto;padding:18px 16px 60px}
+.bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.grow{flex:1}
+.muted{color:var(--muted)}.small{font-size:12px}
+.hint{color:var(--muted);margin:0 0 14px;font-size:13px}
+.btn{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--panel);color:var(--fg);padding:6px 12px;border-radius:7px;cursor:pointer;white-space:nowrap;line-height:1.3}
+.btn:hover{background:var(--panel2)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}
+.btn.primary:hover{filter:brightness(1.07)}
+.btn.danger{color:var(--err);border-color:var(--err-soft)}
+.btn.danger:hover{background:var(--err-soft)}
+.btn.ghost{border-color:transparent;background:transparent}
+.btn.icon{padding:5px 8px;min-width:30px}
+.btn.sm{padding:3px 8px;font-size:12px}
+input,select,textarea{font:inherit;font-size:13px;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:6px 9px;width:100%;min-width:0}
+textarea{resize:vertical}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+input:disabled{background:var(--panel2);color:var(--muted)}
+input[type=checkbox]{width:auto;accent-color:var(--accent)}
+.f{display:flex;flex-direction:column;gap:4px;margin-bottom:12px}
+.f>span{font-weight:600;font-size:12.5px}
+.f small,.f .sub{color:var(--muted);font-size:12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:0 14px}
+.check{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:13px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px;box-shadow:var(--shadow);margin-bottom:14px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;box-shadow:var(--shadow)}
+.stat .k{color:var(--muted);font-size:12px}
+.stat .v{font-size:22px;font-weight:650;margin-top:2px;font-variant-numeric:tabular-nums}
+.stat.err .v{color:var(--err)}.stat.routed .v{color:var(--accent)}
+.cmd{display:flex;align-items:center;gap:8px;background:var(--panel2);border-radius:8px;padding:8px 10px;margin:8px 0}
+.cmd code{background:none;font-size:14px;flex:1;overflow-x:auto;white-space:nowrap}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r);background:var(--panel)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top;white-space:nowrap}
+th{font-weight:600;color:var(--muted);font-size:12px;background:var(--panel2)}
+tr:last-child td{border-bottom:0}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.click{cursor:pointer}tr.click:hover td{background:var(--panel2)}
+td.errc{white-space:normal;max-width:320px;color:var(--err);cursor:pointer}
+td.errc .t{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td.errc.open .t{white-space:pre-wrap;word-break:break-word}
+.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;background:var(--panel2);color:var(--muted);border:1px solid var(--line);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+.badge.routed{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+.badge.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.badge.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.badge.err{background:var(--err-soft);color:var(--err);border-color:transparent}
+.badge.info{background:var(--info-soft);color:var(--info);border-color:transparent}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;box-shadow:var(--shadow)}
+.card.click{cursor:pointer}.card.click:hover{border-color:var(--accent)}
+.card .title{display:flex;align-items:center;gap:8px;font-weight:650;margin-bottom:4px;word-break:break-all}
+.card .desc{color:var(--muted);font-size:13px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:8px;white-space:pre-line}
+.card .meta{display:flex;gap:6px;flex-wrap:wrap}
+.empty{padding:30px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:var(--r)}
+.loading{padding:30px;color:var(--muted);text-align:center}
+.errbox{padding:14px;border-radius:var(--r);background:var(--err-soft);color:var(--err)}
+.note{padding:10px 12px;border-radius:8px;background:var(--info-soft);color:var(--info);font-size:13px;margin-bottom:12px}
+.note.warn{background:var(--warn-soft);color:var(--warn)}
+.switch{position:relative;display:inline-block;width:34px;height:20px;flex:none}
+.switch input{opacity:0;width:0;height:0}
+.switch span{position:absolute;inset:0;background:var(--line);border-radius:20px;cursor:pointer;transition:.15s}
+.switch span:before{content:"";position:absolute;width:14px;height:14px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.15s}
+.switch input:checked+span{background:var(--ok)}
+.switch input:checked+span:before{transform:translateX(14px)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.chip{display:inline-flex;align-items:center;gap:4px;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--mono);font-size:12px}
+.chip button{border:0;background:none;color:var(--muted);cursor:pointer;font-size:15px;line-height:1;padding:0 4px;border-radius:50%}
+.chip button:hover{color:var(--err)}
+.row{display:flex;gap:8px;align-items:center}
+.hrow{display:flex;gap:6px;margin-bottom:6px}
+.fetchbox{border:1px solid var(--line);border-radius:8px;padding:8px;margin-bottom:10px;background:var(--panel2)}
+.fetchlist{max-height:220px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:2px 10px;margin:8px 0;font-family:var(--mono);font-size:12px}
+.fetchlist label{display:flex;gap:6px;align-items:center;word-break:break-all}
+.route{border:1px solid var(--line);border-radius:8px;padding:12px 12px 0;background:var(--panel2)}
+.route details{margin-bottom:12px}
+.route summary{cursor:pointer;color:var(--muted);font-size:13px;font-weight:600;user-select:none}
+.route details[open] summary{margin-bottom:10px}
+.rule{margin-bottom:12px}
+.rule-head{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+.rule-head .num{font-weight:700;color:var(--muted);min-width:24px}
+.rule-head .r-match{flex:1;min-width:150px}
+.presets{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+.preset{text-align:left;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer;color:var(--fg);font:inherit}
+.preset:hover{border-color:var(--accent)}
+.preset b{display:block;margin-bottom:2px}
+.preset span{color:var(--muted);font-size:12px;display:block;word-break:break-all}
+.cdot{width:10px;height:10px;border-radius:50%;flex:none;border:1px solid var(--line)}
+.backdrop{position:fixed;inset:0;background:rgba(10,12,15,.5);z-index:50;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto}
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:100%;max-width:620px;box-shadow:0 20px 60px rgba(0,0,0,.3);display:flex;flex-direction:column}
+.modal.wide{max-width:860px}
+.mhead{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}
+.mhead h3{flex:1;word-break:break-all}
+.mbody{padding:16px}
+.mfoot{display:flex;gap:8px;align-items:center;padding:12px 16px;border-top:1px solid var(--line);position:sticky;bottom:0;background:var(--panel);border-radius:0 0 12px 12px}
+pre.reply{white-space:pre-wrap;word-break:break-word;background:var(--panel2);padding:8px;border-radius:7px;margin:6px 0 0;max-height:200px;overflow:auto}
+textarea.yaml{min-height:60vh;font-family:var(--mono);font-size:12.5px;line-height:1.5;tab-size:2;white-space:pre}
+#toasts{position:fixed;right:16px;bottom:16px;z-index:100;display:flex;flex-direction:column;gap:8px;max-width:min(420px,calc(100vw - 32px))}
+.toast{background:var(--fg);color:var(--bg);padding:9px 14px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:13px;word-break:break-word;animation:tin .15s ease-out}
+.toast.err{background:var(--err);color:#fff}.toast.ok{background:var(--ok);color:#fff}
+@keyframes tin{from{transform:translateY(8px);opacity:0}}
+#tokenbox{position:fixed;inset:0;z-index:90;background:rgba(10,12,15,.55);display:flex;align-items:center;justify-content:center;padding:16px}
+#tokenbox form{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;width:100%;max-width:360px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.seg button{border:0;background:var(--panel);color:var(--muted);padding:5px 10px;font:inherit;font-size:13px;cursor:pointer}
+.seg button.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.seg button+button{border-left:1px solid var(--line)}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:13px}
+.kv div:nth-child(odd){color:var(--muted)}
+.kv div{word-break:break-all}
+@media (max-width:760px){
+  .top{flex-wrap:wrap;gap:6px 10px;padding:8px 12px}
+  nav#tabs{order:3;flex-basis:100%}
+  .brand{flex:1}
+  .stats{grid-template-columns:1fr 1fr}
+  .grid2,.grid3{grid-template-columns:1fr}
+  main{padding:14px 12px 60px}
+  .backdrop{padding:0}
+  .modal,.modal.wide{border-radius:0;min-height:100vh;border:0}
+  .mfoot{border-radius:0}
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="dot" id="online" title="Connection"></span><b>claude-hybrid</b><span class="muted small" id="ver"></span></div>
+  <nav id="tabs"></nav>
+  <div class="actions">
+    <button class="btn icon ghost" id="reloadBtn" title="Reload config and agents from disk">↻</button>
+    <button class="btn icon ghost" id="themeBtn" title="Toggle light/dark">◐</button>
+  </div>
+</header>
+<main id="view"></main>
+<div id="modal-root"></div>
+<div id="token-root"></div>
+<div id="toasts"></div>
+<script>
+'use strict';
+/* ---------- helpers ---------- */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const enc = encodeURIComponent;
+function h(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { /* ignore */ } }
+};
+function toast(msg, kind) {
+  const t = document.createElement('div');
+  t.className = 'toast ' + (kind || '');
+  t.textContent = msg;
+  $('#toasts').appendChild(t);
+  setTimeout(() => t.remove(), kind === 'err' ? 6000 : 3000);
+}
+function fmtNum(n) { return (Number(n) || 0).toLocaleString(); }
+function fmtDur(s) {
+  s = Math.floor(Number(s) || 0);
+  const d = Math.floor(s / 86400), hh = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  if (d) return d + 'd ' + hh + 'h';
+  if (hh) return hh + 'h ' + m + 'm';
+  if (m) return m + 'm ' + sec + 's';
+  return sec + 's';
+}
+function fmtTime(t) {
+  const d = new Date(t);
+  if (isNaN(d)) return h(t);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+}
+function statusBadge(st, err) {
+  const cls = !st ? 'err' : st < 300 ? 'ok' : st < 500 ? 'warn' : 'err';
+  return `<span class="badge ${err && st < 300 ? 'warn' : cls}">${st ? h(st) : 'ERR'}</span>`;
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e2) { /* ignore */ }
+    ta.remove();
+  }
+  toast('Copied', 'ok');
+}
+async function run(fn, btn) {
+  if (btn) btn.disabled = true;
+  try { return await fn(); }
+  catch (e) { toast(e.message || String(e), 'err'); }
+  finally { if (btn) btn.disabled = false; }
+}
+function clone(o) { return JSON.parse(JSON.stringify(o == null ? null : o)); }
+
+/* ---------- token + api ---------- */
+(function takeUrlToken() {
+  try {
+    const u = new URL(location.href);
+    const t = u.searchParams.get('token');
+    if (t) {
+      store.set('chr_token', t);
+      u.searchParams.delete('token');
+      history.replaceState(null, '', u.pathname + u.search + u.hash);
+    }
+  } catch (e) { /* ignore */ }
+})();
+let tokenPromise = null;
+function askToken() {
+  if (tokenPromise) return tokenPromise;
+  tokenPromise = new Promise(resolve => {
+    const root = $('#token-root');
+    root.innerHTML = `<div id="tokenbox"><form>
+      <h3 style="margin-bottom:6px">Panel token required</h3>
+      <p class="hint">This panel is protected. Enter the panel token from your config.</p>
+      <input type="password" id="tok-in" autocomplete="current-password" placeholder="Token">
+      <div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn primary" type="submit">Continue</button></div>
+    </form></div>`;
+    const f = $('form', root);
+    setTimeout(() => $('#tok-in').focus(), 0);
+    f.onsubmit = e => {
+      e.preventDefault();
+      const v = $('#tok-in').value.trim();
+      if (!v) return;
+      store.set('chr_token', v);
+      root.innerHTML = '';
+      tokenPromise = null;
+      resolve();
+    };
+  });
+  return tokenPromise;
+}
+async function api(method, path, body) {
+  const headers = { 'X-CHR': '1' };
+  const tok = store.get('chr_token');
+  if (tok) headers['X-CHR-Token'] = tok;
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  let res;
+  try {
+    res = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, cache: 'no-store' });
+  } catch (e) {
+    setOnline(false);
+    throw new Error('Cannot reach claude-hybrid (' + e.message + ')');
+  }
+  setOnline(true);
+  if (res.status === 401) { await askToken(); return api(method, path, body); }
+  const txt = await res.text();
+  let data = null;
+  if (txt) { try { data = JSON.parse(txt); } catch (e) { data = res.ok ? txt : { error: txt.slice(0, 300) }; } }
+  if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+  return data;
+}
+function setOnline(on) {
+  const d = $('#online');
+  d.className = 'dot ' + (on ? 'on' : 'off');
+  d.title = on ? 'Connected' : 'Not reachable';
+}
+
+/* ---------- state ---------- */
+const state = {
+  status: null, providers: [], agents: [], rules: [], presets: null,
+  logs: [], lastLogId: 0, logsLoaded: false, paused: false, logFilter: 'all', openErr: new Set()
+};
+const loadProviders = async () => (state.providers = (await api('GET', '/api/providers')) || []);
+const loadAgents = async () => (state.agents = (await api('GET', '/api/agents')) || []);
+const loadRules = async () => (state.rules = (await api('GET', '/api/rules')) || []);
+const loadStatus = async () => {
+  state.status = await api('GET', '/api/status');
+  if (state.status) $('#ver').textContent = state.status.version ? 'v' + String(state.status.version).replace(/^v/, '') : '';
+  return state.status;
+};
+async function fetchLogs() {
+  const r = await api('GET', '/api/logs?since=' + state.lastLogId);
+  state.logsLoaded = true;
+  if (Array.isArray(r) && r.length) {
+    for (const e of r) if (e.id > state.lastLogId) state.logs.push(e);
+    state.lastLogId = Math.max(state.lastLogId, ...r.map(e => e.id || 0));
+    if (state.logs.length > 500) state.logs.splice(0, state.logs.length - 500);
+    return true;
+  }
+  return false;
+}
+
+/* ---------- modal ---------- */
+function openModal({ title, body, foot, wide }) {
+  const root = $('#modal-root');
+  root.innerHTML = `<div class="backdrop"><div class="modal${wide ? ' wide' : ''}" role="dialog" aria-modal="true">
+    <div class="mhead"><h3>${h(title)}</h3><button class="btn icon ghost" data-close title="Close">✕</button></div>
+    <div class="mbody">${body}</div>
+    <div class="mfoot">${foot || '<div class="grow"></div><button class="btn" data-close>Close</button>'}</div></div></div>`;
+  const m = $('.modal', root);
+  $$('[data-close]', m).forEach(b => (b.onclick = closeModal));
+  return m;
+}
+function closeModal() { $('#modal-root').innerHTML = ''; }
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('#modal-root').firstChild && !$('#token-root').firstChild) closeModal();
+});
+
+/* ---------- route editor ---------- */
+let uidN = 0;
+const ROUTE_DEFAULT = { provider: '', model: '', max_tokens: 0, temperature: null, reasoning_effort: '', system_mode: 'keep', system_prompt: '' };
+function routeBadge(r) {
+  if (!r || !r.provider) return '<span class="badge">Anthropic</span>';
+  return `<span class="badge routed" title="Routed">${h(r.provider)} / ${h(r.model || 'same model')}</span>`;
+}
+function mountRoute(el, route) {
+  const r = Object.assign({}, ROUTE_DEFAULT, route || {});
+  const id = 'rt' + (++uidN);
+  const provs = state.providers.filter(p => p.enabled);
+  const known = state.providers.find(p => p.id === r.provider);
+  let opts = `<option value="">Anthropic (subscription)</option>` +
+    provs.map(p => `<option value="${h(p.id)}"${p.id === r.provider ? ' selected' : ''}>${h(p.name || p.id)} (${h(p.id)})</option>`).join('');
+  if (r.provider && !provs.some(p => p.id === r.provider))
+    opts += `<option value="${h(r.provider)}" selected>${h(r.provider)} (${known ? 'disabled' : 'missing'})</option>`;
+  const advOpen = r.max_tokens || r.temperature != null || r.reasoning_effort || (r.system_mode && r.system_mode !== 'keep');
+  el.innerHTML = `<div class="route">
+    <div class="grid2">
+      <label class="f"><span>Provider</span><select class="rt-prov">${opts}</select>
+        <small class="rt-provhint"></small></label>
+      <label class="f rt-on"><span>Model</span><input class="rt-model mono" list="${id}-dl" value="${h(r.model)}" placeholder="keep the request's model" spellcheck="false"><datalist id="${id}-dl"></datalist>
+        <small>Pick from the list or type any model id.</small></label>
+    </div>
+    <details class="rt-on"${advOpen ? ' open' : ''}><summary>Advanced</summary>
+      <div class="grid3">
+        <label class="f"><span>Max tokens cap</span><input class="rt-max" type="number" min="0" step="1" value="${r.max_tokens ? h(r.max_tokens) : ''}" placeholder="no cap"></label>
+        <label class="f"><span>Temperature</span><input class="rt-temp" type="number" min="0" max="2" step="0.05" value="${r.temperature == null ? '' : h(r.temperature)}" placeholder="keep"></label>
+        <label class="f"><span>Reasoning effort</span><select class="rt-eff">
+          ${['', 'low', 'medium', 'high'].map(x => `<option value="${x}"${x === r.reasoning_effort ? ' selected' : ''}>${x || 'default'}</option>`).join('')}
+          ${r.reasoning_effort && !['low', 'medium', 'high'].includes(r.reasoning_effort) ? `<option selected value="${h(r.reasoning_effort)}">${h(r.reasoning_effort)}</option>` : ''}
+        </select></label>
+      </div>
+      <label class="f"><span>System prompt</span><select class="rt-mode">
+        <option value="keep"${r.system_mode === 'replace' || r.system_mode === 'append' ? '' : ' selected'}>Keep original</option>
+        <option value="replace"${r.system_mode === 'replace' ? ' selected' : ''}>Replace with text below</option>
+        <option value="append"${r.system_mode === 'append' ? ' selected' : ''}>Append text below</option>
+      </select></label>
+      <label class="f rt-sysw"><textarea class="rt-sys mono" rows="5" placeholder="System prompt text">${h(r.system_prompt)}</textarea></label>
+    </details></div>`;
+  const prov = $('.rt-prov', el), mode = $('.rt-mode', el);
+  const sync = () => {
+    const pid = prov.value;
+    const p = state.providers.find(x => x.id === pid);
+    $$('.rt-on', el).forEach(x => (x.style.display = pid ? '' : 'none'));
+    $('.rt-provhint', el).textContent = pid ? (p ? `${p.type} · ${(p.models || []).length} models` : 'Provider not found') : 'Pass-through to Anthropic. No changes.';
+    $(`#${id}-dl`, el).innerHTML = (p && p.models || []).map(m => `<option value="${h(m)}">`).join('');
+    $('.rt-sysw', el).style.display = mode.value === 'keep' ? 'none' : '';
+  };
+  prov.onchange = sync; mode.onchange = sync; sync();
+  el._get = () => {
+    const pid = prov.value;
+    const t = $('.rt-temp', el).value.trim();
+    const tv = t === '' ? null : parseFloat(t);
+    if (!pid) return Object.assign({}, ROUTE_DEFAULT, { system_prompt: r.system_prompt || '' }, { provider: '' });
+    return {
+      provider: pid,
+      model: $('.rt-model', el).value.trim(),
+      max_tokens: Math.max(0, parseInt($('.rt-max', el).value, 10) || 0),
+      temperature: tv == null || isNaN(tv) ? null : tv,
+      reasoning_effort: $('.rt-eff', el).value,
+      system_mode: mode.value,
+      system_prompt: $('.rt-sys', el).value
+    };
+  };
+  return el;
+}
+
+/* ---------- router ---------- */
+const TABS = [['dashboard', 'Dashboard'], ['agents', 'Agents'], ['providers', 'Providers'], ['rules', 'Rules'], ['logs', 'Logs'], ['settings', 'Settings'], ['raw', 'Raw config']];
+const views = {};
+let renderGen = 0;
+function curTab() {
+  const t = (location.hash || '').replace(/^#\/?/, '');
+  return TABS.some(x => x[0] === t) ? t : 'dashboard';
+}
+$('#tabs').innerHTML = TABS.map(([k, l]) => `<a href="#${k}" data-tab="${k}">${l}</a>`).join('');
+async function render() {
+  const tab = curTab();
+  $$('#tabs a').forEach(a => a.classList.toggle('active', a.dataset.tab === tab));
+  const gen = ++renderGen;
+  const alive = () => gen === renderGen;
+  const v = $('#view');
+  v.innerHTML = '<div class="loading">Loading…</div>';
+  closeModal();
+  try { await views[tab](v, alive); }
+  catch (e) {
+    if (!alive()) return;
+    v.innerHTML = `<div class="errbox">${h(e.message || e)}</div><p><button class="btn" id="retry">Retry</button></p>`;
+    $('#retry').onclick = render;
+  }
+}
+window.addEventListener('hashchange', render);
+
+/* ---------- dashboard ---------- */
+views.dashboard = async (v, alive) => {
+  await Promise.all([loadStatus(), state.logsLoaded ? null : fetchLogs()]);
+  if (!alive()) return;
+  v.innerHTML = '<div id="dash"></div>';
+  paintDash();
+};
+function paintDash() {
+  const d = $('#dash'); const s = state.status;
+  if (!d || !s) return;
+  const st = s.stats || {};
+  const targets = st.targets || [];
+  const cmd = s.launch_cmd || 'claude-hybrid';
+  const recent = state.logs.slice(-10).reverse();
+  d.innerHTML = `
+  <div class="stats">
+    <div class="stat"><div class="k">Uptime</div><div class="v">${h(fmtDur(s.uptime_s))}</div></div>
+    <div class="stat"><div class="k">Requests</div><div class="v">${h(fmtNum(st.requests))}</div></div>
+    <div class="stat routed"><div class="k">Routed</div><div class="v">${h(fmtNum(st.routed))}</div></div>
+    <div class="stat err"><div class="k">Errors</div><div class="v">${h(fmtNum(st.errors))}</div></div>
+  </div>
+  <div class="panel">
+    <h3>How to start</h3>
+    <div class="cmd"><code>${h(cmd)}</code><button class="btn sm" id="copyCmd">Copy</button></div>
+    <p class="hint" style="margin:0">Run <code>${h(cmd)}</code> instead of <code>claude</code>. It starts Claude Code with
+      <code>ANTHROPIC_BASE_URL</code> pointing at this proxy (<code>${h(s.proxy_listen)}</code>). Normal requests still use your
+      Anthropic subscription. Routed agents and rules go to your providers.</p>
+  </div>
+  <div class="panel"><div class="kv">
+    <div>Proxy</div><div><code>${h(s.proxy_listen)}</code></div>
+    <div>Panel</div><div><code>${h(s.panel_listen)}</code></div>
+    <div>Config</div><div><code>${h(s.config_path)}</code></div>
+    <div>Agents dir</div><div><code>${h(s.agents_dir)}</code></div>
+  </div></div>
+  <h4>Targets</h4>
+  ${targets.length ? `<div class="tablewrap"><table><thead><tr><th>Target</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Tokens in</th><th class="num">Tokens out</th><th class="num">Avg latency</th></tr></thead><tbody>
+    ${targets.map(t => `<tr><td><code>${h(t.target)}</code></td><td class="num">${h(fmtNum(t.requests))}</td><td class="num">${t.errors ? `<span style="color:var(--err)">${h(fmtNum(t.errors))}</span>` : '0'}</td><td class="num">${h(fmtNum(t.input_tokens))}</td><td class="num">${h(fmtNum(t.output_tokens))}</td><td class="num">${h(fmtNum(Math.round(t.avg_latency_ms || 0)))} ms</td></tr>`).join('')}
+  </tbody></table></div>` : '<div class="empty">No requests yet.</div>'}
+  <div class="bar" style="margin-top:18px"><h4 style="margin:0">Recent requests</h4><div class="grow"></div><a href="#logs" class="small">All logs →</a></div>
+  ${logTable(recent, false)}`;
+  $('#copyCmd').onclick = () => copyText(cmd);
+  bindLogTable(d);
+}
+
+/* ---------- logs ---------- */
+function logTarget(e) {
+  if (e.kind !== 'routed') return '<span class="muted">Anthropic</span>' + (e.model && e.model !== e.req_model ? ' / ' + h(e.model) : '');
+  return `<b>${h(e.provider)}</b> / ${h(e.model || e.req_model)}`;
+}
+function logTable(list, full) {
+  if (!list.length) return `<div class="empty">${state.logsLoaded ? 'No log entries.' : 'Loading…'}</div>`;
+  return `<div class="tablewrap"><table><thead><tr><th>Time</th><th>Source</th><th>Request → target</th><th>Status</th><th class="num">Latency</th><th class="num">Tokens in/out</th>${full ? '<th>Path</th>' : ''}<th>Error</th></tr></thead><tbody>
+  ${list.map(e => `<tr>
+    <td title="${h(e.time)}">${fmtTime(e.time)}</td>
+    <td>${e.source ? `<span class="badge${e.kind === 'routed' ? ' routed' : ''}">${h(e.source)}</span>` : '<span class="muted">–</span>'}</td>
+    <td><span class="mono">${h(e.req_model)}</span> → ${logTarget(e)}${e.stream ? ' <span class="badge info" title="Streaming">SSE</span>' : ''}</td>
+    <td>${statusBadge(e.status, e.error)}</td>
+    <td class="num">${h(fmtNum(e.latency_ms))} ms</td>
+    <td class="num">${h(fmtNum(e.input_tokens))} / ${h(fmtNum(e.output_tokens))}</td>
+    ${full ? `<td class="mono muted">${h(e.path)}</td>` : ''}
+    <td class="errc${state.openErr.has(e.id) ? ' open' : ''}" data-id="${h(e.id)}" title="${e.error ? 'Click to expand' : ''}"><span class="t">${h(e.error)}</span></td>
+  </tr>`).join('')}</tbody></table></div>`;
+}
+function bindLogTable(root) {
+  $$('td.errc', root).forEach(td => (td.onclick = () => {
+    const id = Number(td.dataset.id);
+    if (state.openErr.has(id)) state.openErr.delete(id); else state.openErr.add(id);
+    td.classList.toggle('open');
+  }));
+}
+views.logs = async (v, alive) => {
+  if (!state.logsLoaded) await fetchLogs();
+  if (!alive()) return;
+  v.innerHTML = `<div class="bar"><h2>Logs</h2><div class="grow"></div>
+    <div class="seg" id="lfilter">${[['all', 'All'], ['routed', 'Routed'], ['errors', 'Errors']].map(([k, l]) => `<button data-f="${k}" class="${state.logFilter === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <button class="btn" id="lpause">${state.paused ? '▶ Resume' : '❚❚ Pause'}</button></div>
+    <p class="hint">Newest first. Up to 500 entries kept in this page. Updates every 2s.</p>
+    <div id="logbody"></div>`;
+  $$('#lfilter button').forEach(b => (b.onclick = () => {
+    state.logFilter = b.dataset.f;
+    $$('#lfilter button').forEach(x => x.classList.toggle('on', x === b));
+    paintLogs();
+  }));
+  $('#lpause').onclick = e => {
+    state.paused = !state.paused;
+    e.target.textContent = state.paused ? '▶ Resume' : '❚❚ Pause';
+    if (!state.paused) paintLogs();
+  };
+  paintLogs();
+};
+function paintLogs() {
+  const b = $('#logbody'); if (!b) return;
+  let list = state.logs.slice().reverse();
+  if (state.logFilter === 'routed') list = list.filter(e => e.kind === 'routed');
+  if (state.logFilter === 'errors') list = list.filter(e => e.error || !e.status || e.status >= 400);
+  b.innerHTML = logTable(list, true);
+  bindLogTable(b);
+}
+let polling = false, tickN = 0;
+setInterval(async () => {
+  if (document.hidden || polling || $('#token-root').firstChild) return;
+  const t = curTab();
+  if (t !== 'logs' && t !== 'dashboard') return;
+  polling = true;
+  try {
+    const fresh = await fetchLogs();
+    if (t === 'dashboard' && curTab() === 'dashboard') {
+      if (++tickN % 3 === 0 || fresh) await loadStatus();
+      paintDash();
+    } else if (t === 'logs' && curTab() === 'logs' && fresh && !state.paused) paintLogs();
+  } catch (e) { /* offline indicator handles it */ }
+  finally { polling = false; }
+}, 2000);
+
+/* ---------- agents ---------- */
+const COLORS = { red: '#e5484d', blue: '#3e7bfa', green: '#30a46c', yellow: '#e2b308', purple: '#8e4ec6', orange: '#f76b15', pink: '#d6409f', cyan: '#05a2c2' };
+views.agents = async (v, alive) => {
+  await Promise.all([loadProviders(), loadAgents()]);
+  if (!alive()) return;
+  const list = state.agents.slice().sort((a, b) => a.name.localeCompare(b.name));
+  v.innerHTML = `<div class="bar"><h2>Agents</h2><span class="muted">${list.length}</span><div class="grow"></div>
+    <button class="btn primary" id="newAgent">+ New agent</button></div>
+    <p class="hint">Claude Code subagents (<code>~/.claude/agents/*.md</code>). Set a route to send an agent's requests to another provider.</p>
+    ${list.length ? `<div class="cards">${list.map((a, i) => `<div class="card click" data-i="${i}" tabindex="0">
+      <div class="title"><span class="cdot" style="background:${COLORS[a.color] || 'transparent'}"></span>${h(a.name)}</div>
+      <div class="desc">${h(a.description) || '<i>No description</i>'}</div>
+      <div class="meta">${routeBadge(a.route)}<span class="badge" title="Claude model">${h(a.model || 'inherit')}</span>${a.tools ? `<span class="badge" title="${h(a.tools)}">${h(a.tools.split(',').length)} tools</span>` : ''}</div>
+    </div>`).join('')}</div>` : '<div class="empty">No agents yet. Create one to get started.</div>'}`;
+  $('#newAgent').onclick = () => openAgentEditor(null);
+  $$('.card[data-i]', v).forEach(c => {
+    const a = list[Number(c.dataset.i)];
+    c.onclick = () => openAgentEditor(a);
+    c.onkeydown = e => { if (e.key === 'Enter') openAgentEditor(a); };
+  });
+};
+function openAgentEditor(orig) {
+  const isNew = !orig;
+  const a = Object.assign({ name: '', description: '', tools: '', model: '', color: '', prompt: '', route: {} }, clone(orig) || {});
+  const colors = [''].concat(Object.keys(COLORS));
+  if (a.color && !colors.includes(a.color)) colors.push(a.color);
+  const m = openModal({
+    title: isNew ? 'New agent' : 'Edit agent: ' + a.name, wide: true,
+    body: `<div class="grid2">
+      <label class="f"><span>Name</span><input id="ag-name" value="${h(a.name)}" placeholder="my-agent" spellcheck="false" autocomplete="off"><small>Letters, digits, <code>. _ -</code>. Also the file name.</small></label>
+      <label class="f"><span>Claude model</span><input id="ag-model" list="ag-models" value="${h(a.model)}" placeholder="inherit" spellcheck="false">
+        <datalist id="ag-models"><option value="inherit"><option value="sonnet"><option value="opus"><option value="haiku"></datalist>
+        <small>What Claude Code requests. A route below can send it elsewhere.</small></label>
+    </div>
+    <label class="f"><span>Description</span><textarea id="ag-desc" rows="3">${h(a.description)}</textarea><small>Claude reads this to decide when to use the agent.</small></label>
+    <div class="grid2">
+      <label class="f"><span>Tools</span><input id="ag-tools" value="${h(a.tools)}" placeholder="Read, Grep, Glob" spellcheck="false"><small>Comma separated. Empty = all tools.</small></label>
+      <label class="f"><span>Color</span><select id="ag-color">${colors.map(c => `<option value="${h(c)}"${c === a.color ? ' selected' : ''}>${h(c || 'none')}</option>`).join('')}</select></label>
+    </div>
+    ${a.file ? `<p class="muted small" style="margin-top:0">File: <code>${h(a.file)}</code></p>` : ''}
+    <label class="f"><span>System prompt</span><textarea id="ag-prompt" class="mono" rows="14" spellcheck="false">${h(a.prompt)}</textarea></label>
+    <h4>Routing</h4><div id="ag-route"></div>`,
+    foot: `${isNew ? '' : '<button class="btn danger" id="ag-del">Delete</button>'}<div class="grow"></div>
+      <button class="btn" data-close>Cancel</button><button class="btn primary" id="ag-save">Save</button>`
+  });
+  const re = mountRoute($('#ag-route', m), a.route);
+  if (isNew) $('#ag-name', m).focus();
+  $('#ag-save', m).onclick = e => run(async () => {
+    const name = $('#ag-name', m).value.trim();
+    if (!/^[A-Za-z0-9_.-]+$/.test(name)) throw new Error('Name may only use letters, digits, . _ -');
+    const body = Object.assign({}, a, {
+      name,
+      description: $('#ag-desc', m).value.trim(),
+      tools: $('#ag-tools', m).value.trim(),
+      model: $('#ag-model', m).value.trim(),
+      color: $('#ag-color', m).value,
+      prompt: $('#ag-prompt', m).value,
+      route: re._get()
+    });
+    if (isNew && state.agents.some(x => x.name === name)) throw new Error('An agent with this name already exists');
+    await api('PUT', '/api/agents/' + enc(isNew ? name : orig.name), body);
+    closeModal();
+    toast('Agent saved', 'ok');
+    render();
+  }, e.target);
+  const del = $('#ag-del', m);
+  if (del) del.onclick = e => run(async () => {
+    if (!confirm(`Move agent "${orig.name}" to trash?`)) return;
+    const r = await api('DELETE', '/api/agents/' + enc(orig.name));
+    closeModal();
+    toast('Moved to trash' + (r && r.trashed_to ? ': ' + r.trashed_to : ''), 'ok');
+    render();
+  }, e.target);
+}
+
+/* ---------- providers ---------- */
+function keyStatus(p) {
+  if (p.has_api_key) return `<span class="badge ok" title="${h(p.api_key)}">Key set</span>`;
+  if (p.api_key_env) return `<span class="badge info">Env: ${h(p.api_key_env)}</span>`;
+  return '<span class="badge">No key</span>';
+}
+views.providers = async (v, alive) => {
+  await loadProviders();
+  if (!alive()) return;
+  const list = state.providers;
+  v.innerHTML = `<div class="bar"><h2>Providers</h2><span class="muted">${list.length}</span><div class="grow"></div>
+    <button class="btn primary" id="addProv">+ Add provider</button></div>
+    <p class="hint">APIs that routed requests can go to. OpenAI-compatible or Anthropic-compatible.</p>
+    ${list.length ? `<div class="tablewrap"><table><thead><tr><th>On</th><th>Provider</th><th>Type</th><th>Base URL</th><th class="num">Models</th><th>Key</th></tr></thead><tbody>
+      ${list.map((p, i) => `<tr class="click" data-i="${i}">
+        <td><label class="switch" title="Enabled"><input type="checkbox" data-en="${i}"${p.enabled ? ' checked' : ''}><span></span></label></td>
+        <td><b>${h(p.name || p.id)}</b><div class="muted small mono">${h(p.id)}</div></td>
+        <td><span class="badge">${h(p.type)}</span></td>
+        <td class="mono small">${h(p.base_url)}</td>
+        <td class="num">${(p.models || []).length}</td>
+        <td>${keyStatus(p)}</td></tr>`).join('')}
+    </tbody></table></div>` : '<div class="empty">No providers yet. Add one from a preset.</div>'}`;
+  $('#addProv').onclick = openPresetPicker;
+  $$('tr[data-i]', v).forEach(tr => (tr.onclick = e => {
+    if (e.target.closest('.switch')) return;
+    openProviderEditor(list[Number(tr.dataset.i)], false);
+  }));
+  $$('input[data-en]', v).forEach(cb => (cb.onchange = () => {
+    const p = list[Number(cb.dataset.en)];
+    run(async () => {
+      try {
+        const saved = await api('PUT', '/api/providers/' + enc(p.id), Object.assign({}, p, { enabled: cb.checked }));
+        Object.assign(p, saved || { enabled: cb.checked });
+        toast(`${p.name || p.id} ${cb.checked ? 'enabled' : 'disabled'}`, 'ok');
+      } catch (err) { cb.checked = !cb.checked; throw err; }
+    });
+  }));
+};
+async function openPresetPicker() {
+  await run(async () => {
+    if (!state.presets) state.presets = (await api('GET', '/api/presets')) || [];
+    const m = openModal({
+      title: 'Add provider', wide: true,
+      body: `<p class="hint">Pick a template to prefill the form, or start from scratch.</p><div class="presets">
+        ${state.presets.map((p, i) => `<button class="preset" data-i="${i}"><b>${h(p.name)}</b><span>${h(p.type)} · ${h(p.base_url)}</span>${p.note ? `<span>${h(p.note)}</span>` : ''}</button>`).join('')}
+        <button class="preset" data-i="-1"><b>Custom</b><span>Empty form</span></button></div>`
+    });
+    $$('.preset', m).forEach(b => (b.onclick = () => {
+      const pr = state.presets[Number(b.dataset.i)];
+      let id = pr ? pr.id : '';
+      if (id && state.providers.some(x => x.id === id)) { let n = 2; while (state.providers.some(x => x.id === id + '-' + n)) n++; id = id + '-' + n; }
+      openProviderEditor({
+        id, name: pr ? pr.name : '', type: pr ? pr.type : 'openai', base_url: pr ? pr.base_url : '',
+        api_key: '', has_api_key: false, api_key_env: pr ? pr.api_key_env || '' : '', headers: {},
+        models: pr ? (pr.models || []).slice() : [], max_tokens_field: pr ? pr.max_tokens_field || '' : '', enabled: true
+      }, true);
+    }));
+  });
+}
+function hdrRow(k, val) {
+  return `<div class="hrow"><input class="hk mono" placeholder="Header-Name" value="${h(k)}" spellcheck="false"><input class="hv mono" placeholder="value" value="${h(val)}" spellcheck="false"><button class="btn icon ghost" data-rm title="Remove">✕</button></div>`;
+}
+function openProviderEditor(orig, isNew) {
+  const p = Object.assign({ id: '', name: '', type: 'openai', base_url: '', api_key: '', has_api_key: false, api_key_env: '', headers: {}, models: [], max_tokens_field: '', enabled: true }, clone(orig));
+  let models = (p.models || []).slice();
+  const m = openModal({
+    title: isNew ? 'New provider' : 'Provider: ' + (p.name || p.id), wide: true,
+    body: `<div class="grid2">
+      <label class="f"><span>ID</span><input id="pv-id" class="mono" value="${h(p.id)}" ${isNew ? '' : 'disabled'} placeholder="my-provider" spellcheck="false"><small>${isNew ? 'Lowercase slug: a-z 0-9 _ -. Cannot change later.' : 'Used in routes. Cannot be changed.'}</small></label>
+      <label class="f"><span>Name</span><input id="pv-name" value="${h(p.name)}" placeholder="Display name"></label>
+    </div>
+    <div class="grid2">
+      <label class="f"><span>Type</span><select id="pv-type"><option value="openai"${p.type === 'openai' ? ' selected' : ''}>OpenAI-compatible</option><option value="anthropic"${p.type === 'anthropic' ? ' selected' : ''}>Anthropic-compatible</option></select></label>
+      <label class="f"><span>Base URL</span><input id="pv-url" class="mono" value="${h(p.base_url)}" placeholder="https://api.openai.com/v1" spellcheck="false"><small id="pv-urlhint"></small></label>
+    </div>
+    <div class="grid2">
+      <label class="f"><span>API key</span><input id="pv-key" type="password" autocomplete="new-password" placeholder="${h(p.has_api_key ? p.api_key || '••••' : 'sk-…')}">
+        <small>${p.has_api_key ? 'Leave blank to keep the current key.' : 'Not needed for local servers.'}</small></label>
+      <label class="f"><span>API key env var</span><input id="pv-env" class="mono" value="${h(p.api_key_env)}" placeholder="OPENAI_API_KEY" spellcheck="false"><small>Optional. Read the key from this environment variable.</small></label>
+    </div>
+    <div class="grid2">
+      <label class="f" id="pv-mtfw"><span>Max tokens field</span><select id="pv-mtf">
+        <option value=""${!p.max_tokens_field ? ' selected' : ''}>Default</option>
+        <option value="max_tokens"${p.max_tokens_field === 'max_tokens' ? ' selected' : ''}>max_tokens</option>
+        <option value="max_completion_tokens"${p.max_tokens_field === 'max_completion_tokens' ? ' selected' : ''}>max_completion_tokens</option>
+      </select><small>Newer OpenAI models need max_completion_tokens.</small></label>
+      <div class="f"><span>Enabled</span><label class="check" style="margin-top:6px"><input type="checkbox" id="pv-en"${p.enabled ? ' checked' : ''}> Use this provider in routes</label></div>
+    </div>
+    <h4>Models</h4>
+    <div class="chips" id="pv-chips"></div>
+    <div class="row" style="margin-bottom:8px"><input id="pv-madd" class="mono" placeholder="Add model id and press Enter" spellcheck="false"><button class="btn" id="pv-maddb">Add</button>
+      <button class="btn" id="pv-fetch" ${isNew ? 'disabled' : ''}>Fetch from provider</button></div>
+    ${isNew ? '<p class="muted small" style="margin-top:0">Save the provider first to fetch models or test it.</p>' : ''}
+    <div id="pv-fetchbox"></div>
+    <h4>Extra headers</h4>
+    <div id="pv-hdrs">${Object.entries(p.headers || {}).map(([k, val]) => hdrRow(k, val)).join('')}</div>
+    <button class="btn sm" id="pv-hadd">+ Header</button>
+    ${isNew ? '' : `<h4>Test</h4>
+    <div class="row"><select id="pv-tmodel"></select><button class="btn" id="pv-test">Test</button></div>
+    <small class="muted">Sends a tiny request using the saved settings.</small>
+    <div id="pv-tout"></div>`}`,
+    foot: `${isNew ? '' : '<button class="btn danger" id="pv-del">Delete</button>'}<div class="grow"></div>
+      <button class="btn" data-close>Cancel</button><button class="btn primary" id="pv-save">Save</button>`
+  });
+  const typeSel = $('#pv-type', m), urlIn = $('#pv-url', m);
+  const syncType = () => {
+    const oa = typeSel.value === 'openai';
+    $('#pv-mtfw', m).style.visibility = oa ? '' : 'hidden';
+    const base = (urlIn.value.trim() || '{base_url}').replace(/\/+$/, '');
+    $('#pv-urlhint', m).textContent = 'Requests go to ' + base + (oa ? '/chat/completions' : '/v1/messages');
+  };
+  typeSel.onchange = syncType; urlIn.oninput = syncType; syncType();
+  const paintChips = () => {
+    $('#pv-chips', m).innerHTML = models.length
+      ? models.map((x, i) => `<span class="chip">${h(x)}<button data-i="${i}" title="Remove">×</button></span>`).join('')
+      : '<span class="muted small">No models yet. Routes can still use any model id.</span>';
+    const ts = $('#pv-tmodel', m);
+    if (ts) { const cur = ts.value; ts.innerHTML = models.map(x => `<option${x === cur ? ' selected' : ''}>${h(x)}</option>`).join('') || '<option value="">(no models)</option>'; }
+  };
+  $('#pv-chips', m).onclick = e => {
+    const b = e.target.closest('button[data-i]');
+    if (b) { models.splice(Number(b.dataset.i), 1); paintChips(); }
+  };
+  const addModel = () => {
+    const inp = $('#pv-madd', m);
+    inp.value.split(/[\s,]+/).map(s => s.trim()).filter(Boolean).forEach(x => { if (!models.includes(x)) models.push(x); });
+    inp.value = ''; paintChips();
+  };
+  $('#pv-maddb', m).onclick = addModel;
+  $('#pv-madd', m).onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addModel(); } };
+  paintChips();
+  $('#pv-fetch', m).onclick = e => run(async () => {
+    const r = await api('POST', `/api/providers/${enc(p.id)}/models`);
+    const list = Array.from(new Set((r && r.models) || [])).sort();
+    const box = $('#pv-fetchbox', m);
+    if (!list.length) { box.innerHTML = '<p class="muted small">Provider returned no models.</p>'; return; }
+    box.innerHTML = `<div class="fetchbox"><div class="row"><input id="fb-filter" placeholder="Filter ${list.length} models" spellcheck="false">
+      <button class="btn sm" id="fb-all">Select all</button><button class="btn sm" id="fb-none">None</button></div>
+      <div class="fetchlist">${list.map(x => `<label><input type="checkbox" value="${h(x)}"${models.includes(x) ? ' checked disabled' : ''}>${h(x)}</label>`).join('')}</div>
+      <div class="row"><button class="btn primary sm" id="fb-add">Add selected</button><button class="btn sm" id="fb-addall">Add all</button><button class="btn sm ghost" id="fb-close">Close</button>
+      <span class="muted small">Then click Save.</span></div></div>`;
+    const visible = () => $$('.fetchlist label', box).filter(l => l.style.display !== 'none').map(l => $('input', l));
+    $('#fb-filter', box).oninput = ev => {
+      const q = ev.target.value.toLowerCase();
+      $$('.fetchlist label', box).forEach(l => (l.style.display = l.textContent.toLowerCase().includes(q) ? '' : 'none'));
+    };
+    $('#fb-all', box).onclick = () => visible().forEach(c => (c.checked = true));
+    $('#fb-none', box).onclick = () => visible().forEach(c => { if (!c.disabled) c.checked = false; });
+    const merge = arr => { let n = 0; arr.forEach(x => { if (!models.includes(x)) { models.push(x); n++; } }); paintChips(); box.innerHTML = ''; toast(n + ' models added. Save to keep them.'); };
+    $('#fb-add', box).onclick = () => merge($$('.fetchlist input:checked', box).map(c => c.value));
+    $('#fb-addall', box).onclick = () => merge(list);
+    $('#fb-close', box).onclick = () => (box.innerHTML = '');
+  }, e.target);
+  const hdrs = $('#pv-hdrs', m);
+  hdrs.onclick = e => { const b = e.target.closest('[data-rm]'); if (b) b.parentElement.remove(); };
+  $('#pv-hadd', m).onclick = () => { hdrs.insertAdjacentHTML('beforeend', hdrRow('', '')); $$('.hk', hdrs).pop().focus(); };
+  const testBtn = $('#pv-test', m);
+  if (testBtn) testBtn.onclick = e => run(async () => {
+    const out = $('#pv-tout', m);
+    out.innerHTML = '<p class="muted small">Testing…</p>';
+    try {
+      const r = await api('POST', `/api/providers/${enc(p.id)}/test`, { model: $('#pv-tmodel', m).value });
+      out.innerHTML = r && r.ok
+        ? `<p><span class="badge ok">OK</span> <span class="muted small">${h(fmtNum(r.latency_ms))} ms</span></p>${r.reply ? `<pre class="reply">${h(r.reply)}</pre>` : ''}`
+        : `<p><span class="badge err">Failed</span>${r && r.latency_ms ? ` <span class="muted small">${h(fmtNum(r.latency_ms))} ms</span>` : ''}</p><pre class="reply">${h((r && r.error) || 'Unknown error')}</pre>`;
+    } catch (err) { out.innerHTML = `<pre class="reply" style="color:var(--err)">${h(err.message)}</pre>`; }
+  }, e.target);
+  $('#pv-save', m).onclick = e => run(async () => {
+    const id = isNew ? $('#pv-id', m).value.trim() : p.id;
+    if (!/^[a-z0-9_-]+$/.test(id)) throw new Error('ID must be lowercase letters, digits, _ or -');
+    if (isNew && state.providers.some(x => x.id === id)) throw new Error('A provider with this ID already exists');
+    const base = urlIn.value.trim();
+    if (!base) throw new Error('Base URL is required');
+    const headers = {};
+    $$('.hrow', hdrs).forEach(r => { const k = $('.hk', r).value.trim(); if (k) headers[k] = $('.hv', r).value; });
+    const key = $('#pv-key', m).value.trim();
+    const body = Object.assign({}, p, {
+      id, name: $('#pv-name', m).value.trim() || id, type: typeSel.value, base_url: base,
+      api_key: key || (isNew ? '' : p.api_key || ''), api_key_env: $('#pv-env', m).value.trim(),
+      headers, models: models.slice(), max_tokens_field: typeSel.value === 'openai' ? $('#pv-mtf', m).value : '',
+      enabled: $('#pv-en', m).checked
+    });
+    delete body.has_api_key;
+    const saved = await api('PUT', '/api/providers/' + enc(id), body);
+    await loadProviders();
+    if (curTab() === 'providers') await views.providers($('#view'), () => true);
+    if (isNew) {
+      toast('Provider saved. You can now fetch models and test it.', 'ok');
+      openProviderEditor(saved || state.providers.find(x => x.id === id) || body, false);
+    } else { closeModal(); toast('Provider saved', 'ok'); }
+  }, e.target);
+  const del = $('#pv-del', m);
+  if (del) del.onclick = e => run(async () => {
+    if (!confirm(`Delete provider "${p.name || p.id}"?`)) return;
+    await api('DELETE', '/api/providers/' + enc(p.id));
+    closeModal(); toast('Provider deleted', 'ok'); render();
+  }, e.target);
+}
+
+/* ---------- rules ---------- */
+let rulesDraft = [];
+views.rules = async (v, alive) => {
+  await Promise.all([loadProviders(), loadRules()]);
+  if (!alive()) return;
+  rulesDraft = clone(state.rules) || [];
+  v.innerHTML = `<div class="bar"><h2>Rules</h2><div class="grow"></div>
+    <button class="btn" id="addRule">+ Add rule</button><button class="btn primary" id="saveRules">Save all</button></div>
+    <p class="hint">Requests that are not from a routed agent are matched by model name. First match wins. No match = Anthropic.
+      Patterns are globs, e.g. <code>claude-haiku-*</code> or <code>*</code>.</p>
+    <div id="rulelist"></div>`;
+  paintRules();
+  $('#addRule').onclick = () => {
+    syncRules();
+    rulesDraft.push({ match: '', enabled: true, note: '', route: Object.assign({}, ROUTE_DEFAULT) });
+    paintRules();
+    const ins = $$('#rulelist .r-match'); if (ins.length) ins[ins.length - 1].focus();
+  };
+  $('#saveRules').onclick = e => run(async () => {
+    syncRules();
+    rulesDraft.forEach((r, i) => { if (!r.match) throw new Error(`Rule #${i + 1} needs a match pattern`); });
+    state.rules = (await api('PUT', '/api/rules', rulesDraft)) || rulesDraft;
+    rulesDraft = clone(state.rules);
+    paintRules();
+    toast('Rules saved', 'ok');
+  }, e.target);
+};
+function syncRules() {
+  $$('#rulelist .rule').forEach(card => {
+    const r = rulesDraft[Number(card.dataset.i)];
+    if (!r) return;
+    r.match = $('.r-match', card).value.trim();
+    r.enabled = $('.r-en', card).checked;
+    r.note = $('.r-note', card).value;
+    r.route = $('.r-route', card)._get();
+  });
+}
+function paintRules() {
+  const box = $('#rulelist'); if (!box) return;
+  if (!rulesDraft.length) { box.innerHTML = '<div class="empty">No rules. Everything not from a routed agent goes to Anthropic.</div>'; return; }
+  box.innerHTML = rulesDraft.map((r, i) => `<div class="card rule" data-i="${i}">
+    <div class="rule-head"><span class="num">#${i + 1}</span>
+      <input class="r-match mono" value="${h(r.match)}" placeholder="claude-haiku-*" spellcheck="false">
+      <label class="check"><input type="checkbox" class="r-en"${r.enabled ? ' checked' : ''}> Enabled</label>
+      <button class="btn icon" data-act="up" title="Move up"${i === 0 ? ' disabled' : ''}>↑</button>
+      <button class="btn icon" data-act="down" title="Move down"${i === rulesDraft.length - 1 ? ' disabled' : ''}>↓</button>
+      <button class="btn icon danger" data-act="del" title="Delete">✕</button></div>
+    <label class="f"><input class="r-note" value="${h(r.note)}" placeholder="Note (optional)"></label>
+    <div class="r-route"></div></div>`).join('');
+  $$('.rule', box).forEach(card => mountRoute($('.r-route', card), rulesDraft[Number(card.dataset.i)].route));
+  box.onclick = e => {
+    const b = e.target.closest('button[data-act]'); if (!b) return;
+    const i = Number(b.closest('.rule').dataset.i);
+    syncRules();
+    if (b.dataset.act === 'up' && i > 0) rulesDraft.splice(i - 1, 0, rulesDraft.splice(i, 1)[0]);
+    else if (b.dataset.act === 'down' && i < rulesDraft.length - 1) rulesDraft.splice(i + 1, 0, rulesDraft.splice(i, 1)[0]);
+    else if (b.dataset.act === 'del') { if (!confirm(`Delete rule #${i + 1}?`)) return; rulesDraft.splice(i, 1); }
+    paintRules();
+  };
+}
+
+/* ---------- settings ---------- */
+views.settings = async (v, alive) => {
+  const s = await api('GET', '/api/settings');
+  if (!alive()) return;
+  const fld = (k, label, hint, attrs) => `<label class="f"><span>${label}</span><input id="st-${k}" class="mono" value="${h(s[k])}" spellcheck="false" ${attrs || ''}>${hint ? `<small>${hint}</small>` : ''}</label>`;
+  v.innerHTML = `<div class="bar"><h2>Settings</h2><div class="grow"></div><button class="btn primary" id="saveSet">Save</button></div>
+    <div id="st-note"></div>
+    <div class="panel">
+      <div class="grid2">
+        ${fld('proxy_listen', 'Proxy listen', 'Address Claude Code connects to. Restart needed.')}
+        ${fld('panel_listen', 'Panel listen', 'Address of this panel. Restart needed.')}
+      </div>
+      <div class="grid2">
+        ${fld('upstream', 'Anthropic upstream', 'Where pass-through requests go.')}
+        ${fld('header_timeout', 'Header timeout (seconds)', 'How long to wait for response headers.', 'type="number" min="0" step="1"')}
+      </div>
+      <div class="grid2">
+        ${fld('agents_dir', 'Agents directory', 'Folder with agent .md files.')}
+        ${fld('log_file', 'Log file', 'Empty = no log file.')}
+      </div>
+      <label class="f"><span>Panel token</span><input id="st-tok" type="password" autocomplete="new-password" placeholder="${h(s.panel_token ? s.panel_token : 'not set')}">
+        <small>${s.panel_token ? 'A token is set. Leave blank to keep it.' : 'Optional. Protects this panel.'}</small></label>
+    </div>`;
+  $('#saveSet').onclick = e => run(async () => {
+    const body = Object.assign({}, s);
+    ['proxy_listen', 'panel_listen', 'upstream', 'agents_dir', 'log_file'].forEach(k => (body[k] = $('#st-' + k).value.trim()));
+    body.header_timeout = Math.max(0, parseInt($('#st-header_timeout').value, 10) || 0);
+    const tok = $('#st-tok').value.trim();
+    body.panel_token = tok || s.panel_token || '';
+    const r = await api('PUT', '/api/settings', body);
+    if (tok) store.set('chr_token', tok);
+    if (r && r.settings) Object.assign(s, r.settings);
+    $('#st-tok').value = '';
+    $('#st-note').innerHTML = r && r.restart_required ? '<div class="note warn">Saved. Restart claude-hybrid to apply the new listen address.</div>' : '';
+    toast('Settings saved', 'ok');
+  }, e.target);
+};
+
+/* ---------- raw config ---------- */
+views.raw = async (v, alive) => {
+  const r = await api('GET', '/api/config/raw');
+  if (!alive()) return;
+  v.innerHTML = `<div class="bar"><h2>Raw config</h2><div class="grow"></div>
+    <button class="btn" id="rawReload" title="Re-read config and agents from disk">Reload</button><button class="btn primary" id="rawSave">Save</button></div>
+    <div class="note warn">API keys are shown masked. Masked values are kept as they are when you save. Invalid YAML is rejected.</div>
+    <textarea id="rawText" class="yaml" spellcheck="false"></textarea>`;
+  const ta = $('#rawText');
+  ta.value = (r && r.yaml) || '';
+  ta.onkeydown = e => {
+    if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); ta.setRangeText('  ', ta.selectionStart, ta.selectionEnd, 'end'); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); $('#rawSave').click(); }
+  };
+  $('#rawSave').onclick = e => run(async () => {
+    await api('PUT', '/api/config/raw', { yaml: ta.value });
+    toast('Config saved', 'ok');
+  }, e.target);
+  $('#rawReload').onclick = e => run(async () => {
+    await api('POST', '/api/reload');
+    const r2 = await api('GET', '/api/config/raw');
+    ta.value = (r2 && r2.yaml) || '';
+    toast('Reloaded from disk', 'ok');
+  }, e.target);
+};
+
+/* ---------- header actions + theme ---------- */
+function applyTheme(t) {
+  if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  else document.documentElement.removeAttribute('data-theme');
+}
+applyTheme(store.get('chr_theme'));
+$('#themeBtn').onclick = () => {
+  const cur = document.documentElement.getAttribute('data-theme') ||
+    (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  applyTheme(next); store.set('chr_theme', next);
+};
+$('#reloadBtn').onclick = e => run(async () => {
+  if ($('#modal-root').firstChild && !confirm('Reload from disk? Unsaved changes in the open editor will be lost.')) return;
+  await api('POST', '/api/reload');
+  toast('Reloaded config and agents', 'ok');
+  render();
+}, e.currentTarget);
+
+loadStatus().catch(() => {});
+render();
+</script>
+</body>
+</html>

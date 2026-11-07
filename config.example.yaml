@@ -1,119 +1,66 @@
-# claude-hybrid-router provider configuration (post-musistudio egress)
-# Copy to ~/.claude-hybrid/config.yaml and uncomment the providers you want.
-#
-# HOW IT WORKS:
-#   - Go router intercepts HTTPS traffic from Claude Code via MITM CONNECT.
-#   - Requests without a routing marker go straight to api.anthropic.com.
-#   - Requests *with* a marker like
-#         <!-- @proxy-local-route:af83e9 model=LABEL -->
-#     in the system field are forwarded to a local musistudio/claude-code-router
-#     egress at http://127.0.0.1:3456/v1/messages. musistudio owns all
-#     Anthropic↔OpenAI translation and provider-specific quirks.
-#
-# The Go router's only job on the local-route path is:
-#   (1) resolve LABEL → (provider-name, backend-model),
-#   (2) rewrite the request body's `model` field to musistudio's
-#       "<provider-name>,<backend-model>" selector,
-#   (3) set x-api-key and forward.
-#
-# Provider `name` MUST match a provider declared in musistudio's config.json.
+# ~/.claude-hybrid/config.yaml — usually edited in the web panel.
+version: 2
 
-# Optional global egress settings. Shared defaults when a provider does not
-# override them. Defaults shown are the ones used when this section is absent.
-# egress:
-#   url: http://127.0.0.1:3456        # default
-#   api_key: ${MUSISTUDIO_APIKEY}     # set if musistudio's APIKEY is configured
+server:
+  proxy_listen: 127.0.0.1:3457   # Claude Code's ANTHROPIC_BASE_URL
+  panel_listen: 127.0.0.1:3458   # web panel
+  panel_token: ""                # required if the panel listens beyond localhost
+  upstream: https://api.anthropic.com
+  header_timeout: 300            # seconds to wait for a provider's first byte
+  agents_dir: ~/.claude/agents   # written as an absolute path by default
+  log_file: ~/.claude-hybrid/proxy.log
 
 providers:
+  - id: openrouter
+    name: OpenRouter
+    type: openai                 # openai = translated, anthropic = passed through
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY   # or api_key: sk-...
+    models: [deepseek/deepseek-chat-v3.1, qwen/qwen3-coder]
+    enabled: true
 
-  # ─── Ollama (local) ──────────────────────────────────────────────────
-  # Declare the musistudio provider-name (`ollama`) and a mapping from the
-  # short label used in routing markers to the backend model id.
-  #
-  # - name: ollama
-  #   models:
-  #     fast: qwen3:32b
-  #     reasoning: deepseek-r1:14b
+  - id: openai
+    type: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    max_tokens_field: max_completion_tokens
+    models: [gpt-5]
+    enabled: true
 
-  # ─── DeepSeek ────────────────────────────────────────────────────────
-  # - name: deepseek
-  #   models:
-  #     reasoner: deepseek-reasoner
-  #     chat: deepseek-chat
+  - id: zai
+    name: Z.ai GLM
+    type: anthropic
+    base_url: https://api.z.ai/api/anthropic
+    api_key_env: ZAI_API_KEY
+    models: [glm-4.6]
+    enabled: true
 
-  # ─── OpenAI / Azure / anything OpenAI-compatible ─────────────────────
-  # - name: openai
-  #   models:
-  #     gpt4: gpt-4.1
-  #     mini: gpt-4.1-mini
+  - id: ollama
+    type: openai
+    base_url: http://127.0.0.1:11434/v1
+    models: [qwen3-coder:30b]
+    enabled: true
 
-  # ─── OpenRouter ──────────────────────────────────────────────────────
-  # - name: openrouter
-  #   models:
-  #     llama: meta-llama/llama-4-maverick
-  #     deepseek: deepseek/deepseek-r1
+# Subagent name -> route. The agent file needs the marker line
+# <!-- claude-hybrid:agent=NAME --> (the panel adds it on save).
+agents:
+  code-reviewer:
+    provider: openai
+    model: gpt-5
+    reasoning_effort: high
+  doc-writer:
+    provider: zai
+    model: glm-4.6
+    max_tokens: 16000
+    system_mode: append          # keep | append | replace
+    system_prompt: Write in plain, short sentences.
 
-  # ─── Groq ────────────────────────────────────────────────────────────
-  # - name: groq
-  #   models:
-  #     llama: llama-3.3-70b-versatile
-
-  # ─── Gemini ──────────────────────────────────────────────────────────
-  # - name: gemini
-  #   models:
-  #     pro: gemini-1.5-pro
-  #     flash: gemini-2.5-flash
-
-  # ─── Per-provider overrides ──────────────────────────────────────────
-  # `max_tokens` caps max_tokens for this provider (client asks can only be
-  # lowered, never raised). `endpoint` and `api_key` let you point specific
-  # providers at a non-default musistudio instance (useful for split
-  # self-hosted + shared setups).
-  #
-  # - name: custom-router
-  #   endpoint: https://egress.internal.example.com
-  #   api_key: ${CUSTOM_EGRESS_KEY}
-  #   max_tokens: 8192
-  #   models:
-  #     big: my-custom-model
-
-  # ─── Exa-safe research wrapper ───────────────────────────────────────
-  # Force research through an Exa-backed command bridge that returns a
-  # normalized evidence envelope instead of dumping raw page text.
-  #
-  # - name: exa
-  #   command: "exa-safe-wrapper --query '$PROMPT'"
-  #   exa:
-  #     mode: envelope
-  #     default_full_text: false
-  #     allow_full_text: true
-  #     full_text_on_low_signal: true
-  #     min_highlight_chars: 300
-  #     default_num_results: 5
-  #     max_num_results: 10
-  #     search_type: auto
-  #     enable_highlights: true
-  #     enable_summary: true
-  #     highlights_max_characters: 1200
-  #     text_max_characters: 0
-  #     max_age_hours: 24
-  #   models:
-  #     research: exa-research
-
-  # ─── Command bridge (unchanged by the musistudio migration) ──────────
-  # Command providers do NOT hit musistudio — they short-circuit into a
-  # Bash tool_use so Claude Code runs a shell command (e.g. `opencode run`).
-  #
-  # - name: my-agents
-  #   command: "opencode run --agent $AGENT --format json '$PROMPT'"
-  #   models:
-  #     simplifier: simplifier
-  #     reviewer: architecture-reviewer
-
-# ─── Expert bypass ─────────────────────────────────────────────────────
-# If you declared a custom router entry inside musistudio that itself uses
-# the "provider,model" form, pass the comma-form verbatim — the Go router
-# leaves model strings containing a comma alone.
-#
-#   models:
-#     glm: Z/glm-4.5,direct     # sent as-is, no auto-prefix
+# For requests not from a routed agent; matched on the request's model.
+# First enabled match wins. No match = Anthropic subscription.
+rules:
+  - match: claude-haiku-*
+    enabled: true
+    note: background jobs (titles, summaries)
+    route:
+      provider: ollama
+      model: qwen3-coder:30b
