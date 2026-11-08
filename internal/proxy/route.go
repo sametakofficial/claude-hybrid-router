@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -103,7 +105,10 @@ func decide(cfg *config.Config, body []byte) (Decision, request, error) {
 		d.Source = "agent:" + agent
 		d.Route = cfg.Agents[agent] // missing entry = Anthropic
 		return d, req, nil
-	case legacyURL != "":
+	case legacyURL != "" && isLoopbackURL(legacyURL):
+		// v1 markers carry their own URL. Only local URLs are honoured: a
+		// project agent file from a cloned repo must not be able to send the
+		// conversation to an arbitrary server.
 		d.Source = "legacy"
 		d.LegacyURL = legacyURL
 		return d, req, nil
@@ -139,4 +144,17 @@ func applyRoute(req request, rt config.Route) {
 			req["system"] = []any{block}
 		}
 	}
+}
+
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

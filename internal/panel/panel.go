@@ -21,6 +21,7 @@ import (
 	"github.com/sametakofficial/claude-hybrid-router/internal/config"
 	"github.com/sametakofficial/claude-hybrid-router/internal/proxy"
 	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
+	"github.com/sametakofficial/claude-hybrid-router/internal/usage"
 )
 
 //go:embed web/index.html
@@ -31,6 +32,7 @@ type Panel struct {
 	Store   *config.Store
 	Rec     *stats.Recorder
 	Proxy   *proxy.Proxy
+	Usage   *usage.Store // optional
 	Version string
 	Started time.Time
 }
@@ -72,6 +74,7 @@ func (p *Panel) Handler() http.Handler {
 	route := func(pattern string, h handlerFunc) { mux.Handle(pattern, p.api(h)) }
 
 	route("GET /api/status", p.status)
+	route("GET /api/usage", p.usageReport)
 	route("GET /api/presets", func(*http.Request) (any, error) { return presets, nil })
 	route("GET /api/providers", p.listProviders)
 	route("PUT /api/providers/{id}", p.putProvider)
@@ -372,9 +375,11 @@ func (p *Panel) discoverModels(r *http.Request) (any, error) {
 	if !strings.HasPrefix(in.BaseURL, "http://") && !strings.HasPrefix(in.BaseURL, "https://") {
 		return nil, bad("base URL must start with http:// or https://")
 	}
-	if old, ok := p.Store.Get().Provider(in.ID); ok && in.ID != "" {
+	if old, ok := p.Store.Get().Provider(in.ID); ok && in.ID != "" && strings.TrimRight(old.BaseURL, "/") == in.BaseURL {
+		// The stored key is only sent to the URL it was saved for.
 		in.APIKey = keepKey(in.APIKey, old.APIKey)
-	} else if in.APIKey == maskedToken {
+		in.APIKeyEnv = old.APIKeyEnv
+	} else if in.APIKey == maskedToken || strings.Contains(in.APIKey, "…") {
 		in.APIKey = ""
 	}
 	models, err := discover(r.Context(), in)
@@ -646,6 +651,7 @@ func (p *Panel) putSettings(r *http.Request) (any, error) {
 				return bad("listen address %q: use host:port", addr)
 			}
 		}
+		lockFileOnly(&in, c.Server)
 		c.Server = in
 		return nil
 	})
@@ -695,6 +701,7 @@ func (p *Panel) putRaw(r *http.Request) (any, error) {
 		if next.Server.PanelToken == maskedToken {
 			next.Server.PanelToken = c.Server.PanelToken
 		}
+		lockFileOnly(&next.Server, c.Server)
 		*c = *next
 		return nil
 	})
@@ -702,4 +709,27 @@ func (p *Panel) putRaw(r *http.Request) (any, error) {
 		return nil, bad("%v", err)
 	}
 	return map[string]bool{"ok": true}, nil
+}
+
+// usageReport returns the savings analysis for the dashboard.
+func (p *Panel) usageReport(*http.Request) (any, error) {
+	if p.Usage == nil {
+		return nil, notFound("usage tracking is not enabled")
+	}
+	srv := p.Store.Current().Server
+	var plan *usage.Plan
+	if pl, ok := usage.PlanByID(srv.Plan, srv.PlanPrice); ok {
+		plan = &pl
+	}
+	return p.Usage.Build(time.Now(), plan), nil
+}
+
+// lockFileOnly keeps the settings that decide where the subscription token,
+// the log and agent files go. Changing them from a browser (or from a
+// prompt-injected tool calling this API) would leak the token or write
+// arbitrary files, so they can only be changed by editing config.yaml.
+func lockFileOnly(next *config.Server, cur config.Server) {
+	next.Upstream = cur.Upstream
+	next.LogFile = cur.LogFile
+	next.AgentsDir = cur.AgentsDir
 }

@@ -7,7 +7,8 @@ import (
 	"strings"
 )
 
-type usage struct{ in, out int }
+// usage counts tokens; in is the total input including cache reads/writes.
+type usage struct{ in, out, cacheRead, cacheWrite int }
 
 // statusWriter records the status code and picks token usage out of the
 // Anthropic response (SSE or JSON) as it passes through. It never changes
@@ -121,12 +122,13 @@ func (s *statusWriter) readUsage(data []byte) {
 		return
 	}
 	if v.Message != nil && v.Message.Usage != nil {
-		s.usage.in = v.Message.Usage.input()
-		s.usage.out = v.Message.Usage.OutputTokens
+		u := v.Message.Usage
+		s.usage = usage{in: u.input(), out: u.OutputTokens, cacheRead: u.CacheRead, cacheWrite: u.CacheCreation}
 	}
 	if v.Usage != nil {
 		if in := v.Usage.input(); in > 0 {
 			s.usage.in = in
+			s.usage.cacheRead, s.usage.cacheWrite = v.Usage.CacheRead, v.Usage.CacheCreation
 		}
 		if v.Usage.OutputTokens > 0 {
 			s.usage.out = v.Usage.OutputTokens

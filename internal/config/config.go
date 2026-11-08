@@ -46,6 +46,10 @@ type Server struct {
 	HeaderTimeout int    `yaml:"header_timeout" json:"header_timeout"` // seconds
 	AgentsDir     string `yaml:"agents_dir" json:"agents_dir"`
 	LogFile       string `yaml:"log_file" json:"log_file"`
+	// Claude subscription plan, used for the savings estimate on the dashboard:
+	// "pro", "max5", "max20", "custom" or "".
+	Plan      string  `yaml:"plan,omitempty" json:"plan"`
+	PlanPrice float64 `yaml:"plan_price,omitempty" json:"plan_price"` // USD/month for "custom"
 }
 
 // Provider is a model backend that routed requests can be sent to.
@@ -183,6 +187,11 @@ func (c *Config) applyDefaults() {
 
 // Validate checks the config for mistakes that would break routing.
 func (c *Config) Validate() error {
+	switch c.Server.Plan {
+	case "", "pro", "max5", "max20", "custom":
+	default:
+		return fmt.Errorf("server.plan must be pro, max5, max20 or custom")
+	}
 	seen := map[string]bool{}
 	for _, p := range c.Providers {
 		if !idRE.MatchString(p.ID) {

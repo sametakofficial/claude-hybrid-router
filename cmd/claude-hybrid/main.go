@@ -24,12 +24,13 @@ import (
 	"github.com/sametakofficial/claude-hybrid-router/internal/panel"
 	"github.com/sametakofficial/claude-hybrid-router/internal/proxy"
 	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
+	"github.com/sametakofficial/claude-hybrid-router/internal/usage"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
 var version = "2.0.0-dev"
 
-const usage = `claude-hybrid — route Claude Code subagents to any model provider
+const helpText = `claude-hybrid — route Claude Code subagents to any model provider
 
 Usage:
   claude-hybrid [claude args...]   start the router if needed, then run claude through it
@@ -77,7 +78,7 @@ func main() {
 	case "version", "--version":
 		fmt.Println("claude-hybrid", version)
 	case "help", "-h", "--help":
-		fmt.Print(usage)
+		fmt.Print(helpText)
 	case "--":
 		err = launch(args[1:])
 	default:
@@ -153,19 +154,37 @@ func serve() error {
 	log.SetOutput(io.MultiWriter(lf, os.Stderr))
 	log.SetFlags(log.LstdFlags)
 
+	us, err := usage.Open(filepath.Join(config.Home(), "usage.json"))
+	if err != nil {
+		return err
+	}
+	defer us.Close()
+
 	rec := stats.New(1000, func(e stats.Entry) {
+		if e.Source != "test" {
+			cached := e.CacheReadTokens + e.CacheWriteTokens
+			us.Add(usage.Record{
+				Time: e.Time, Kind: e.Kind, Source: e.Source, Provider: e.Provider, Model: e.Model, ReqModel: e.ReqModel,
+				Failed: e.Status >= 400 || e.Error != "",
+				Tokens: usage.Tokens{Input: int64(e.InputTokens - cached), Output: int64(e.OutputTokens),
+					CacheRead: int64(e.CacheReadTokens), CacheWrite: int64(e.CacheWriteTokens)},
+			})
+		}
 		target := "anthropic"
 		if e.Provider != "" {
 			target = e.Provider + "/" + e.Model
 		}
-		line := fmt.Sprintf("%s %s %s -> %s status=%d %dms in=%d out=%d", e.Kind, orDash(e.Source), e.ReqModel, target, e.Status, e.LatencyMS, e.InputTokens, e.OutputTokens)
+		// Quoted fields: model names come from requests and must not be able
+		// to start new lines in the log.
+		line := fmt.Sprintf("%s %q %q -> %q status=%d %dms in=%d out=%d", e.Kind, orDash(e.Source), e.ReqModel, target, e.Status, e.LatencyMS, e.InputTokens, e.OutputTokens)
 		if e.Error != "" {
 			line += " error=" + strconv.Quote(e.Error)
 		}
 		log.Print(line)
 	})
 	px := proxy.New(store.Current, rec)
-	pn := &panel.Panel{Store: store, Rec: rec, Proxy: px, Version: version, Started: time.Now()}
+	px.OnUpstreamHeaders = us.ObserveHeaders
+	pn := &panel.Panel{Store: store, Rec: rec, Proxy: px, Usage: us, Version: version, Started: time.Now()}
 
 	proxyLn, err := net.Listen("tcp", cfg.Server.ProxyListen)
 	if err != nil {
@@ -287,8 +306,10 @@ func stop() error {
 	}
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
 	proc, err := os.FindProcess(pid)
-	if err != nil || pid <= 0 {
-		return fmt.Errorf("bad pid file %s", pidPath())
+	if err != nil || pid <= 0 || !isOurs(pid) {
+		os.Remove(pidPath())
+		fmt.Println("claude-hybrid is not running (removed a stale pid file)")
+		return nil
 	}
 	if err := terminate(proc); err != nil {
 		os.Remove(pidPath())
@@ -414,7 +435,7 @@ func installService() error {
 	}
 	// A background copy started by the launcher would hold the ports.
 	if b, err := os.ReadFile(pidPath()); err == nil {
-		if pid, _ := strconv.Atoi(strings.TrimSpace(string(b))); pid > 0 {
+		if pid, _ := strconv.Atoi(strings.TrimSpace(string(b))); pid > 0 && isOurs(pid) {
 			if p, err := os.FindProcess(pid); err == nil {
 				terminate(p)
 				time.Sleep(500 * time.Millisecond)

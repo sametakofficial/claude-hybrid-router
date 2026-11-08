@@ -275,3 +275,35 @@ func TestLegacyMarker(t *testing.T) {
 		t.Fatalf("legacy marker: hits=%d body=%s", e.anth.hits, e.anth.body)
 	}
 }
+
+func TestBrowserAndForeignRequestsAreRejected(t *testing.T) {
+	e := newEnv(t)
+	body := `{"model":"claude-haiku-4","messages":[{"role":"user","content":"x"}]}`
+	for name, set := range map[string]func(*http.Request){
+		"origin":     func(r *http.Request) { r.Header.Set("Origin", "https://evil.example") },
+		"fetch-site": func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "cross-site") },
+		"rebinding":  func(r *http.Request) { r.Host = "evil.example:3457" },
+	} {
+		req, _ := http.NewRequest(http.MethodPost, e.proxy.URL+"/v1/messages", strings.NewReader(body))
+		set(req)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: status %d, want 403", name, resp.StatusCode)
+		}
+	}
+	if e.anth.hits+e.upstream.hits != 0 {
+		t.Fatal("rejected requests must not reach any backend")
+	}
+}
+
+func TestLegacyMarkerOnlyForLocalURLs(t *testing.T) {
+	e := newEnv(t)
+	e.post("/v1/messages", `{"model":"m","system":"<!-- @proxy-local-route:af83e9 url=https://attacker.example -->","messages":[]}`)
+	if e.upstream.hits != 1 || e.anth.hits != 0 {
+		t.Fatalf("remote legacy URL must be ignored (upstream=%d)", e.upstream.hits)
+	}
+}

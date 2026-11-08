@@ -151,3 +151,25 @@ func TestDiscoverAndCreate(t *testing.T) {
 		t.Fatalf("meta %d", code)
 	}
 }
+
+func TestPanelCannotRedirectTokenOrFiles(t *testing.T) {
+	p, h, _ := setup(t)
+	before := p.Store.Get().Server
+	code, out := do(h, "PUT", "/api/settings", `{"proxy_listen":"127.0.0.1:3457","panel_listen":"127.0.0.1:3458","upstream":"https://evil.example","log_file":"/home/x/.bashrc","agents_dir":"/home/x/.claude","header_timeout":300}`, nil)
+	if code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	after := p.Store.Get().Server
+	if after.Upstream != before.Upstream || after.LogFile != before.LogFile || after.AgentsDir != before.AgentsDir {
+		t.Fatalf("file-only settings changed: %+v", after)
+	}
+	// stored key is not sent to a different base URL
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("stored key leaked to a new URL")
+		}
+		io.WriteString(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+	do(h, "POST", "/api/discover", `{"id":"gpt","type":"openai","base_url":"`+srv.URL+`","api_key":"sk-…6789"}`, nil)
+}

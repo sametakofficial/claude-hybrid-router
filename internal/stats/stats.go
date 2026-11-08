@@ -22,7 +22,10 @@ type Entry struct {
 	LatencyMS    int64     `json:"latency_ms"`
 	InputTokens  int       `json:"input_tokens"`
 	OutputTokens int       `json:"output_tokens"`
-	Error        string    `json:"error"`
+	// Parts of InputTokens that were cache reads / cache writes.
+	CacheReadTokens  int    `json:"cache_read_tokens"`
+	CacheWriteTokens int    `json:"cache_write_tokens"`
+	Error            string `json:"error"`
 }
 
 // Target holds totals for one provider/model pair.

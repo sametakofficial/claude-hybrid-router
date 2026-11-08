@@ -16,3 +16,5 @@ func detach(c *exec.Cmd) {
 }
 
 func terminate(p *os.Process) error { return p.Kill() }
+
+func isOurs(pid int) bool { return true }

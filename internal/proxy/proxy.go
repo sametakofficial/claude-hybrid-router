@@ -38,6 +38,10 @@ type Proxy struct {
 	rec    *stats.Recorder
 	client *http.Client // for providers
 	up     *httputil.ReverseProxy
+
+	// OnUpstreamHeaders, if set, sees the response headers of every
+	// Anthropic /v1/messages reply (used to read subscription rate limits).
+	OnUpstreamHeaders func(http.Header)
 }
 
 // New builds a proxy. cfg must return the live config (treated read-only).
@@ -52,7 +56,11 @@ func New(cfg func() *config.Config, rec *stats.Recorder) *Proxy {
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: timeout,
 	}
-	p := &Proxy{cfg: cfg, rec: rec, client: &http.Client{Transport: transport}}
+	p := &Proxy{cfg: cfg, rec: rec, client: &http.Client{
+		Transport: transport,
+		// Never follow redirects with a provider key attached.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
 	p.up = &httputil.ReverseProxy{
 		Transport:     transport,
 		FlushInterval: -1, // flush every write: SSE must not be buffered
@@ -67,6 +75,14 @@ func New(cfg func() *config.Config, rec *stats.Recorder) *Proxy {
 			// text here and token usage can be read for the stats.
 			pr.Out.Header.Del("Accept-Encoding")
 		},
+		// Headers are read here, before the body is copied, so a stream the
+		// client aborts still reports its rate-limit state.
+		ModifyResponse: func(resp *http.Response) error {
+			if p.OnUpstreamHeaders != nil && strings.HasPrefix(resp.Request.URL.Path, "/v1/messages") {
+				p.OnUpstreamHeaders(resp.Header)
+			}
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if errors.Is(err, context.Canceled) {
 				return
@@ -78,7 +94,30 @@ func New(cfg func() *config.Config, rec *stats.Recorder) *Proxy {
 	return p
 }
 
+// fromBrowser reports requests that a web page sent (Claude Code never sets
+// Origin or Sec-Fetch-*), and requests whose Host is not loopback (DNS
+// rebinding). Without this any open web page could use the provider keys.
+func fromBrowser(r *http.Request) bool {
+	if r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != "" || r.Header.Get("Sec-Fetch-Mode") != "" {
+		return true
+	}
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.Trim(host, "[]"), ".")
+	if host == "localhost" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || !ip.IsLoopback()
+}
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if fromBrowser(r) {
+		writeError(w, http.StatusForbidden, "permission_error", "claude-hybrid: browser and non-local requests are not accepted")
+		return
+	}
 	if r.URL.Path == HealthPath {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"status":"ok","app":"claude-hybrid"}`)
@@ -158,6 +197,7 @@ func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, body []byte,
 	p.up.ServeHTTP(sw, r)
 	e.Status, e.LatencyMS = sw.code(), time.Since(start).Milliseconds()
 	e.InputTokens, e.OutputTokens = sw.usage.in, sw.usage.out
+	e.CacheReadTokens, e.CacheWriteTokens = sw.usage.cacheRead, sw.usage.cacheWrite
 	if e.Status >= 400 {
 		e.Error = sw.errText()
 		if e.Status == http.StatusTooManyRequests {
@@ -304,6 +344,7 @@ func (p *Proxy) toAnthropic(w http.ResponseWriter, r *http.Request, prov config.
 	}
 	e.Status, e.LatencyMS = sw.code(), time.Since(start).Milliseconds()
 	e.InputTokens, e.OutputTokens = sw.usage.in, sw.usage.out
+	e.CacheReadTokens, e.CacheWriteTokens = sw.usage.cacheRead, sw.usage.cacheWrite
 	if copyErr != nil && r.Context().Err() == nil {
 		e.Error = "stream interrupted: " + copyErr.Error()
 	}
@@ -373,6 +414,7 @@ func (p *Proxy) toOpenAI(w http.ResponseWriter, r *http.Request, prov config.Pro
 		usage, err := translate.NewStream(w, flush, shownModel).Run(src)
 		e.Status, e.LatencyMS = 200, time.Since(start).Milliseconds()
 		e.InputTokens, e.OutputTokens = usage.InputTokens+usage.CacheRead, usage.OutputTokens
+		e.CacheReadTokens = usage.CacheRead
 		if err != nil && r.Context().Err() == nil {
 			e.Error = err.Error()
 		}
@@ -393,6 +435,7 @@ func (p *Proxy) toOpenAI(w http.ResponseWriter, r *http.Request, prov config.Pro
 	w.Write(out)
 	e.Status, e.LatencyMS = 200, time.Since(start).Milliseconds()
 	e.InputTokens, e.OutputTokens = usage.InputTokens+usage.CacheRead, usage.OutputTokens
+	e.CacheReadTokens = usage.CacheRead
 	p.rec.Add(e)
 }
 
