@@ -106,6 +106,9 @@ td.errc.open .t{white-space:pre-wrap;word-break:break-word}
 .errbox{padding:14px;border-radius:var(--r);background:var(--err-soft);color:var(--err)}
 .note{padding:10px 12px;border-radius:8px;background:var(--info-soft);color:var(--info);font-size:13px;margin-bottom:12px}
 .note.warn{background:var(--warn-soft);color:var(--warn)}
+.calib{display:flex;align-items:center;gap:10px;margin-top:8px}
+.calib-bar{flex:0 0 160px;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.calib-bar>span{display:block;height:100%;background:var(--accent)}
 .switch{position:relative;display:inline-block;width:34px;height:20px;flex:none}
 .switch input{opacity:0;width:0;height:0}
 .switch span{position:absolute;inset:0;background:var(--line);border-radius:20px;cursor:pointer;transition:.15s}
@@ -181,6 +184,94 @@ details.adv[open]>summary{margin-bottom:10px}
 .where>b{display:block;margin-bottom:6px}
 .idtxt{font-size:12px;color:var(--muted)}
 .ra{display:flex;gap:4px;justify-content:flex-end}
+/* ---- dashboard (series colors validated: blue/orange, both modes) ---- */
+:root{--s-sub:#2a78d6;--s-routed:#eb6834;--s-ghost:#f7c3a8;--s-track:#e3ecf8;--grid:#e9ecf0;--axis:#c3c8cf}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--s-sub:#3987e5;--s-routed:#d95926;--s-ghost:#7f3d20;--s-track:#202b3a;--grid:#262a30;--axis:#3a4048}}
+:root[data-theme="dark"]{--s-sub:#3987e5;--s-routed:#d95926;--s-ghost:#7f3d20;--s-track:#202b3a;--grid:#262a30;--axis:#3a4048}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.dgrid{display:grid;gap:14px;margin-bottom:14px}
+.dgrid>.panel{margin-bottom:0;min-width:0}
+.dgrid.top2{grid-template-columns:minmax(0,1.65fr) minmax(0,1fr)}
+.dgrid.half{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+#dash section{min-width:0}
+#dash>section{margin-bottom:14px}
+#dash>section.panel{margin-bottom:14px}
+.dhead{margin-bottom:8px}
+.eyebrow{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.hero{padding:18px 20px}
+.hero-head{display:flex;align-items:center;gap:8px}
+.hero-fig{display:flex;align-items:baseline;gap:10px;margin:6px 0 2px}
+.hero-fig .big{font-size:52px;line-height:1;font-weight:700;letter-spacing:-.02em}
+.hero-fig .unit{font-size:18px;font-weight:600;color:var(--muted)}
+.hero-sub{margin:4px 0 14px;color:var(--muted);font-size:13.5px}
+.meters{display:flex;flex-direction:column;gap:14px}
+.mtop{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.mname{font-weight:600}
+.meter{position:relative;height:12px;border-radius:6px;background:var(--s-track);overflow:hidden}
+.meter .m-used{position:absolute;left:0;top:0;bottom:0;background:var(--s-sub);border-radius:6px 4px 4px 6px}
+.meter.warn .m-used{background:var(--warn)}.meter.crit .m-used{background:var(--err)}
+.meter .m-ghost{position:absolute;top:0;bottom:0;background:var(--s-ghost);border-radius:4px}
+.meter .m-100{position:absolute;top:-2px;bottom:-2px;width:2px;margin-left:-1px;background:var(--fg);opacity:.55}
+.mcap{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-top:6px;font-size:13px}
+.msave{font-weight:600;white-space:nowrap}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;color:var(--muted);margin-top:12px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw-sub,.sw-routed,.sw-ghost{display:inline-block;width:10px;height:10px;border-radius:3px;flex:none}
+.sw-sub{background:var(--s-sub)}.sw-routed{background:var(--s-routed)}.sw-ghost{background:var(--s-ghost)}
+.plan-seg{margin-top:10px;max-width:100%;flex-wrap:wrap}
+.plan-seg button{padding:6px 12px}
+.pcustom{margin-top:10px;max-width:320px}
+.pcustom input{width:110px;flex:none}
+.pworth{margin:12px 0 0;font-size:13.5px}
+#d-kpi .stats{margin-bottom:12px}
+.stat .sub{color:var(--muted);font-size:12px;margin-top:2px}
+.stat .v{font-variant-numeric:normal}
+.split{margin-bottom:0}
+.sbar-row{display:grid;grid-template-columns:56px minmax(0,1fr) auto;align-items:center;gap:10px;margin:6px 0}
+.sbar-k{font-size:12.5px;color:var(--muted)}
+.sbar-v{font-size:12.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.sbar{display:flex;gap:2px;height:14px;border-radius:4px;background:var(--panel2);overflow:hidden}
+.sbar>div{min-width:3px;flex-grow:0;flex-shrink:0}
+.s-sub{background:var(--s-sub);border-radius:4px 0 0 4px}.s-routed{background:var(--s-routed);border-radius:0 4px 4px 0}
+.sbar>div:only-child{border-radius:4px}
+.chartwrap{position:relative;overflow-x:auto}
+svg.chart{display:block;font:11px system-ui,-apple-system,"Segoe UI",sans-serif}
+svg.chart .grid{stroke:var(--grid);stroke-width:1}
+svg.chart .base{stroke:var(--axis);stroke-width:1}
+svg.chart .tick{fill:var(--muted);font-variant-numeric:tabular-nums}
+svg.chart .emptyt{fill:var(--muted);font-size:13px}
+svg.chart .b-sub{fill:var(--s-sub)}svg.chart .b-routed{fill:var(--s-routed)}
+svg.chart .hit{fill:var(--fg);fill-opacity:0;cursor:default}
+svg.chart .hit.on{fill-opacity:.06}
+.tip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);box-shadow:0 6px 20px rgba(0,0,0,.15);border-radius:8px;padding:8px 10px;font-size:12px;min-width:150px;z-index:5}
+.tip[hidden]{display:none}
+.tip div{display:flex;align-items:center;gap:6px;margin-top:3px}
+.tip div span{margin-left:auto;padding-left:12px;font-weight:600;font-variant-numeric:tabular-nums}
+.share{display:flex;align-items:center;gap:8px;min-width:120px}
+.sharebar{flex:1;height:8px;background:var(--panel2);border-radius:4px;overflow:hidden}
+.sharebar i{display:block;height:100%;background:var(--s-routed);border-radius:0 4px 4px 0}
+.share span{font-size:12px;color:var(--muted);min-width:34px;text-align:right;font-variant-numeric:tabular-nums}
+.mini{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:4px 0 6px}
+.mini>div{background:var(--panel2);border-radius:8px;padding:8px 10px}
+.mini span{display:block;font-size:18px;font-weight:650}
+.mini span.bad{color:var(--err)}
+.mini small{color:var(--muted);font-size:12px}
+.alist{list-style:none;margin:0;padding:0}
+.alist li{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.alist li:last-child{border-bottom:0}
+.compact th,.compact td{padding:5px 8px}
+.how{margin:4px 0 0}
+@media (max-width:560px){.srct th:nth-child(3),.srct td:nth-child(3),.srct th:nth-child(4),.srct td:nth-child(4){display:none}.srct .share{min-width:80px}}.how ul{margin:0;padding-left:18px;color:var(--muted);font-size:13px}.how li{margin:3px 0}
+@media (max-width:760px){
+  .dgrid.top2,.dgrid.half{grid-template-columns:1fr}
+  .hero{padding:14px}
+  .hero-fig .big{font-size:48px}
+  #d-kpi .dhead .small{display:none}
+}
+@media (max-width:420px){
+  .sbar-row{grid-template-columns:48px minmax(0,1fr);}
+  .sbar-v{grid-column:2}
+}
 @media (max-width:760px){
   .top{flex-wrap:wrap;gap:6px 10px;padding:8px 12px}
   nav#tabs{order:3;flex-basis:100%}
@@ -369,7 +460,12 @@ const loadProviders = async () => (state.providers = (await api('GET', '/api/pro
 const loadAgents = async () => (state.agents = (await api('GET', '/api/agents')) || []);
 const loadRules = async () => (state.rules = (await api('GET', '/api/rules')) || []);
 const loadStatus = async () => {
+  const prev = state.status;
   state.status = await api('GET', '/api/status');
+  // Server restarted: log ids start over, so reset the cursor and cached logs.
+  if (prev && state.status && Number(state.status.uptime_s) < Number(prev.uptime_s)) {
+    state.lastLogId = 0; state.logs = []; state.openErr.clear(); state.logsLoaded = false;
+  }
   if (state.status) $('#ver').textContent = state.status.version ? 'v' + String(state.status.version).replace(/^v/, '') : '';
   return state.status;
 };
@@ -511,61 +607,465 @@ async function render() {
 window.addEventListener('hashchange', render);
 
 /* ---------- dashboard ---------- */
-views.dashboard = async (v, alive) => {
-  await Promise.all([loadStatus(), state.logsLoaded ? null : fetchLogs(), loadAgents().catch(() => null)]);
-  if (!alive()) return;
-  v.innerHTML = '<div id="dash"></div>';
-  paintDash();
+/* Each section repaints only when its data key changes, so polling never steals focus or resets scroll. */
+const dash = {
+  usage: null, usageErr: '', usageAt: 0, usageLoading: null, keys: {},
+  period: ['today', '7d', '30d'].includes(store.get('chr_dash_period')) ? store.get('chr_dash_period') : '30d',
+  chartMode: store.get('chr_dash_chart') === 'tokens' ? 'tokens' : 'usd',
+  customOpen: false, savingPlan: false
 };
+const PERIOD_LABEL = { today: 'Today', '7d': '7 days', '30d': '30 days' };
+async function loadUsage() {
+  if (dash.usageLoading) return dash.usageLoading;
+  dash.usageLoading = (async () => {
+    try { dash.usage = await api('GET', '/api/usage'); dash.usageErr = ''; }
+    catch (e) { dash.usageErr = e.message || String(e); }
+    finally { dash.usageAt = Date.now(); dash.usageLoading = null; }
+  })();
+  return dash.usageLoading;
+}
+function fmtCompact(n) {
+  n = Number(n) || 0;
+  const a = Math.abs(n);
+  const f = (x, s) => (x >= 100 ? Math.round(x) : x >= 10 ? x.toFixed(1).replace(/\.0$/, '') : x.toFixed(1).replace(/\.0$/, '')) + s;
+  if (a >= 1e9) return f(n / 1e9, 'B');
+  if (a >= 1e6) return f(n / 1e6, 'M');
+  if (a >= 1e3) return f(n / 1e3, 'K');
+  return String(Math.round(n));
+}
+function fmtMoney(n) {
+  n = Number(n) || 0;
+  if (n === 0) return '$0';
+  if (n < 0.01) return '<$0.01';
+  if (n < 10) return '$' + n.toFixed(2);
+  if (n < 1000) return '$' + Math.round(n);
+  return '$' + fmtCompact(n);
+}
+function fmtPct(f, digits) {
+  const v = (Number(f) || 0) * 100;
+  if (digits) return (v > 0 && v < 1 ? v.toFixed(1) : Math.round(v)) + '%';
+  return Math.round(v) + '%';
+}
+function fmtPts(saved) {
+  const v = Math.max(0, (Number(saved) || 0) * 100);
+  return v < 10 ? v.toFixed(1).replace(/\.0$/, '') : String(Math.round(v));
+}
+const tokSum = t => (t ? (t.input || 0) + (t.output || 0) + (t.cache_read || 0) + (t.cache_write || 0) : 0);
+function claimWindow(claim) {
+  const c = String(claim || '');
+  if (c.includes('seven_day')) return '7d';
+  if (c.includes('five_hour')) return '5h';
+  return c;
+}
+function limitStatusBadge(st) {
+  if (!st) return '';
+  if (st === 'allowed') return '<span class="badge ok">✓ Allowed</span>';
+  if (st === 'allowed_warning') return '<span class="badge warn">! Near limit</span>';
+  if (st === 'rejected') return '<span class="badge err">✕ Rate limited</span>';
+  return `<span class="badge">${h(st)}</span>`;
+}
+function resetText(ts) {
+  if (!ts) return '';
+  const s = ts - Date.now() / 1000;
+  return s > 0 ? 'resets in ' + fmtDur(s) : 'reset due';
+}
+function sourceLabel(src) {
+  const s = String(src || '');
+  const i = s.indexOf(':');
+  const kind = i > 0 ? s.slice(0, i) : '', name = i > 0 ? s.slice(i + 1) : s;
+  if (kind === 'agent') return `<span class="badge routed">agent</span> <b>${h(name)}</b>`;
+  if (kind === 'rule') return `<span class="badge">rule</span> <b>#${h(name)}</b>`;
+  return `<b>${h(s || 'unknown')}</b>`;
+}
+const ROUTE_CTA = '<a href="#agents">Route an agent to another provider</a> to start saving.';
+
+views.dashboard = async (v, alive) => {
+  dash.keys = {};
+  const usageP = loadUsage();
+  await Promise.all([loadStatus(), state.logsLoaded ? null : fetchLogs().catch(() => null), loadAgents().catch(() => null)]);
+  if (!alive()) return;
+  v.innerHTML = `<div id="dash">
+    <div class="dgrid top2">
+      <section class="panel hero" id="d-hero" aria-label="Subscription limit"></section>
+      <section class="panel" id="d-plan" aria-label="Your plan"></section>
+    </div>
+    <section id="d-kpi" aria-label="Offload"></section>
+    <section class="panel" id="d-chart" aria-label="Last 30 days"></section>
+    <section id="d-src" aria-label="Top routed agents and rules"></section>
+    <div class="dgrid half">
+      <section class="panel" id="d-status" aria-label="Proxy"></section>
+      <section class="panel" id="d-agents" aria-label="Routed agents"></section>
+    </div>
+    <section id="d-logs" aria-label="Recent requests"></section>
+    <section id="d-how"></section>
+  </div>`;
+  bindDash($('#dash'));
+  paintDash();
+  await usageP;
+  if (alive()) paintDash();
+};
+
+/* Repaint one section if its key changed. Skips while the user is typing in it; keeps <details data-k> open state. */
+function paintSec(id, key, fn) {
+  const el = document.getElementById(id);
+  if (!el || dash.keys[id] === key) return;
+  const ae = document.activeElement;
+  if (dash.keys[id] !== undefined && ae && el.contains(ae) && ae.matches('input,textarea,select')) return;
+  const open = {};
+  $$('details[data-k]', el).forEach(d => (open[d.dataset.k] = d.open));
+  el.innerHTML = fn();
+  $$('details[data-k]', el).forEach(d => { if (d.dataset.k in open) d.open = open[d.dataset.k]; });
+  dash.keys[id] = key;
+}
 function paintDash() {
-  const d = $('#dash'); const s = state.status;
-  if (!d || !s) return;
-  const st = s.stats || {};
-  const targets = st.targets || [];
-  const cmd = s.launch_cmd || 'claude-hybrid';
-  const recent = state.logs.slice(-10).reverse();
-  d.innerHTML = `
-  <div class="stats">
-    <div class="stat"><div class="k">Uptime</div><div class="v">${h(fmtDur(s.uptime_s))}</div></div>
-    <div class="stat"><div class="k">Requests</div><div class="v">${h(fmtNum(st.requests))}</div></div>
-    <div class="stat routed"><div class="k">Routed</div><div class="v">${h(fmtNum(st.routed))}</div></div>
-    <div class="stat err"><div class="k">Errors</div><div class="v">${h(fmtNum(st.errors))}</div></div>
-  </div>
-  <div class="panel">
-    <h3>How to start</h3>
-    <div class="cmd"><code>${h(cmd)}</code><button class="btn sm" id="copyCmd">Copy</button></div>
-    <p class="hint" style="margin:0">Run <code>${h(cmd)}</code> instead of <code>claude</code>. It starts Claude Code with
-      <code>ANTHROPIC_BASE_URL</code> pointing at this proxy (<code>${h(s.proxy_listen)}</code>). Normal requests still use your
-      Anthropic subscription. Routed agents and rules go to your providers.</p>
-  </div>
-  <div class="panel"><div class="kv">
-    <div>Proxy</div><div><code>${h(s.proxy_listen)}</code></div>
-    <div>Panel</div><div><code>${h(s.panel_listen)}</code></div>
-    <div>Config</div><div><code>${h(s.config_path)}</code></div>
-    <div>Agents dir</div><div><code>${h(s.agents_dir)}</code></div>
-  </div></div>
-  <h4>Routed agents</h4>
-  ${routedAgentsHTML()}
-  <h4>Targets</h4>
-  ${targets.length ? `<div class="tablewrap"><table><thead><tr><th>Target</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Tokens in</th><th class="num">Tokens out</th><th class="num">Avg latency</th></tr></thead><tbody>
-    ${targets.map(t => `<tr><td><code>${h(t.target)}</code></td><td class="num">${h(fmtNum(t.requests))}</td><td class="num">${t.errors ? `<span style="color:var(--err)">${h(fmtNum(t.errors))}</span>` : '0'}</td><td class="num">${h(fmtNum(t.input_tokens))}</td><td class="num">${h(fmtNum(t.output_tokens))}</td><td class="num">${h(fmtNum(Math.round(t.avg_latency_ms || 0)))} ms</td></tr>`).join('')}
-  </tbody></table></div>` : '<div class="empty">No requests yet.</div>'}
-  <div class="bar" style="margin-top:18px"><h4 style="margin:0">Recent requests</h4><div class="grow"></div><a href="#logs" class="small">All logs →</a></div>
-  ${logTable(recent, false)}`;
-  $('#copyCmd').onclick = () => copyText(cmd);
-  bindLogTable(d);
+  if (!$('#dash')) return;
+  const u = dash.usage;
+  const err = dash.usageErr;
+  if (!u) {
+    const msg = err ? `<div class="errbox">Usage report not available: ${h(err)}</div>` : '<div class="loading">Loading usage…</div>';
+    paintSec('d-hero', 'x' + err, () => msg);
+  } else {
+    paintSec('d-hero', JSON.stringify([u.windows, u.limits]), () => heroHTML(u));
+  }
+  paintSec('d-plan', JSON.stringify([u && u.plan, u && u.plans, u && u.periods, u && u.plan_value_ratio, dash.customOpen, dash.savingPlan, !!u]), () => planHTML(u));
+  paintSec('d-kpi', JSON.stringify([u && u.periods, dash.period]), () => kpiHTML(u));
+  const cw = Math.round(($('#d-chart') || {}).clientWidth || 0);
+  paintSec('d-chart', JSON.stringify([u && u.days, dash.chartMode, cw]), () => chartHTML(u, cw));
+  paintSec('d-src', JSON.stringify(u && u.sources), () => sourcesHTML(u));
+  const s = state.status || {};
+  paintSec('d-status', JSON.stringify([s.launch_cmd, s.proxy_listen, s.panel_listen, s.config_path, s.agents_dir]), () => statusHTML(s));
+  liveStatus();
+  paintSec('d-agents', JSON.stringify([state.agents.map(a => [a.name, a.color, a.route]), state.providers.map(p => [p.id, p.name])]), routedAgentsHTML);
+  const recent = state.logs.slice(-8).reverse();
+  paintSec('d-logs', JSON.stringify([state.logsLoaded, recent.map(e => [e.id, e.status])]), () =>
+    `<div class="bar dhead"><h3>Recent requests</h3><div class="grow"></div><a href="#logs" class="small">All logs →</a></div>
+     <div class="compact">${logTable(recent, false)}</div>`);
+  if (dash.keys['d-logs-bound'] !== dash.keys['d-logs']) { bindLogTable($('#d-logs')); dash.keys['d-logs-bound'] = dash.keys['d-logs']; }
+  paintSec('d-how', JSON.stringify([u && u.assumptions, u && u.cache_hit_rate]), () => howHTML(u));
 }
 
-function routedAgentsHTML() {
-  const ra = state.agents.filter(a => a.route && a.route.provider).sort((a, b) => a.name.localeCompare(b.name));
-  if (!ra.length) return `<div class="empty">No routed agents. All agents use your subscription. <a href="#agents">Pick where agents run →</a></div>`;
-  return `<div class="tablewrap"><table><thead><tr><th>Agent</th><th>Runs on</th></tr></thead><tbody>
-    ${ra.map(a => {
-      const p = state.providers.find(x => x.id === a.route.provider);
-      return `<tr><td><span class="cdot" style="display:inline-block;margin-right:6px;background:${COLORS[a.color] || 'transparent'}"></span><b>${h(a.name)}</b></td>
-        <td>${h(p ? p.name || p.id : a.route.provider)} / <span class="mono">${h(a.route.model || 'same model')}</span></td></tr>`;
+/* Live text inside the status card (no repaint). */
+function liveStatus() {
+  const s = state.status; if (!s) return;
+  const st = s.stats || {};
+  const set = (k, v) => { const el = $(`[data-live="${k}"]`); if (el && el.textContent !== v) el.textContent = v; };
+  $$('[data-reset]').forEach(el => { const t = resetText(Number(el.dataset.reset)); if (el.textContent !== t) el.textContent = t; });
+  set('uptime', fmtDur(s.uptime_s));
+  set('req', fmtNum(st.requests)); set('routed', fmtNum(st.routed)); set('errors', fmtNum(st.errors));
+  const e = $('[data-live="errors"]'); if (e) e.classList.toggle('bad', !!st.errors);
+}
+
+/* ---- hero: subscription limit ---- */
+function heroHTML(u) {
+  const wins = (u.windows || []).slice();
+  const claim = claimWindow(u.limits && u.limits.claim);
+  const status = (u.limits && u.limits.status) || '';
+  if (!wins.length) {
+    return `<div class="eyebrow">Subscription limit</div>
+      <div class="hero-fig"><span class="big muted">—</span></div>
+      <p class="hero-sub">No limit data yet. Anthropic reports your usage with each reply, so it shows up after your next Claude Code request through <code>claude-hybrid</code>.</p>`;
+  }
+  wins.sort((a, b) => (b.name === claim) - (a.name === claim));
+  const main = wins[0];
+  const anyRouted = (u.periods || []).some(p => p.routed && p.routed.requests);
+  let fig, sub;
+  if (!main.calibrated) {
+    const prog = Math.round(Math.min(1, Math.max(0, Number(main.calibration) || 0)) * 100);
+    fig = '<span class="big muted">—</span><span class="unit">pts saved</span>';
+    sub = `${h(main.note || 'Not enough data to estimate savings yet.')}
+      <span class="calib" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${prog}" aria-label="Calibration">
+        <span class="calib-bar"><span style="width:${prog}%"></span></span><span class="small muted">Calibrating · ${prog}%</span></span>`;
+  } else {
+    fig = `<span class="big">${h(fmtPts(main.saved))}</span><span class="unit">pts saved</span>`;
+    sub = main.saved > 0
+      ? `of your ${h((main.label || main.name).toLowerCase())}, by routing work to other providers.`
+      : anyRouted ? `on your ${h((main.label || main.name).toLowerCase())} so far.` : `Nothing routed yet. ${ROUTE_CTA}`;
+  }
+  return `<div class="hero-head"><div class="eyebrow">Subscription limit</div><div class="grow"></div>${limitStatusBadge(status)}</div>
+    <div class="hero-fig">${fig}</div>
+    <p class="hero-sub">${sub}</p>
+    <div class="meters">${wins.map(w => meterHTML(w, w.name === claim)).join('')}</div>
+    <div class="legend small"><span><i class="sw-sub"></i>Used now</span><span><i class="sw-ghost"></i>Would be used without routing</span></div>`;
+}
+function meterHTML(w, binding) {
+  const used = Math.max(0, Number(w.utilization) || 0);
+  const est = w.calibrated ? Math.max(used, Number(w.without) || 0) : used;
+  const dom = Math.max(1, est);
+  const pu = Math.min(100, used / dom * 100), pe = Math.min(100, est / dom * 100);
+  const sev = used >= 1 ? ' crit' : used >= 0.9 ? ' warn' : '';
+  const ghostW = pe - pu;
+  const label = w.label || w.name;
+  const caption = w.calibrated
+    ? `<b>${h(fmtPct(used))} used</b>${est > used ? ` · would be ${h(fmtPct(est))} without routing` : ''}`
+    : `<b>${h(fmtPct(used))} used</b> · <span class="muted">${w.calibration !== undefined && !w.calibrated && /^Calibrating/.test(w.note || '') ? 'estimate after calibration' : h(w.note || 'No estimate yet')}</span>`;
+  const aria = `${label}: ${fmtPct(used)} used` + (w.calibrated && est > used ? `, would be ${fmtPct(est)} without routing` : '');
+  return `<div class="mrow">
+    <div class="mtop"><span class="mname">${h(label)}</span>${binding ? '<span class="badge info" title="This window decides when you get rate limited">binding</span>' : ''}
+      <div class="grow"></div><span class="muted small" data-reset="${h(w.reset_at || '')}">${h(resetText(w.reset_at))}</span></div>
+    <div class="meter${sev}" role="img" aria-label="${h(aria)}">
+      <div class="m-used" style="width:${pu.toFixed(2)}%"></div>
+      ${ghostW > 0.3 ? `<div class="m-ghost" style="left:calc(${pu.toFixed(2)}% + 2px);width:calc(${ghostW.toFixed(2)}% - 2px)"></div>` : ''}
+      ${dom > 1 ? `<div class="m-100" style="left:${(100 / dom).toFixed(2)}%" title="100%"></div>` : ''}
+    </div>
+    <div class="mcap"><span>${caption}</span><div class="grow"></div>${w.calibrated ? `<span class="msave">${h(fmtPts(w.saved))} pts saved</span>` : ''}</div>
+  </div>`;
+}
+
+/* ---- plan ---- */
+function planHTML(u) {
+  if (!u) return '<div class="eyebrow">Your plan</div><div class="loading">…</div>';
+  const plans = u.plans || [];
+  const cur = u.plan ? u.plan.id : '';
+  const showCustom = dash.customOpen || cur === 'custom';
+  const p30 = (u.periods || []).find(p => p.name === '30d');
+  const val = p30 && p30.routed ? p30.routed.cost_usd || 0 : 0;
+  const ratio = Number(u.plan_value_ratio) || 0;
+  let worth;
+  if (!val) worth = `<p class="pworth muted">No routed work in the last 30 days yet. ${ROUTE_CTA}</p>`;
+  else {
+    const r = ratio >= 10 ? Math.round(ratio) : ratio >= 1 ? ratio.toFixed(1).replace(/\.0$/, '') : ratio.toFixed(2);
+    worth = `<p class="pworth">Routed work worth <b>${h(fmtMoney(val))}</b> of API usage in the last 30 days${u.plan && u.plan.price_usd ? ` — <b>${h(r)}×</b> your plan price.` : '.'}</p>`;
+  }
+  const subVal = p30 && p30.anthropic ? p30.anthropic.cost_usd || 0 : 0;
+  if (subVal && u.plan && u.plan.price_usd) {
+    const sr = subVal / u.plan.price_usd;
+    worth += `<p class="muted small" style="margin:6px 0 0">Work on your subscription in the same 30 days: ${h(fmtMoney(subVal))} of API usage (${h(sr >= 10 ? Math.round(sr) : sr.toFixed(1).replace(/\.0$/, ''))}× plan price).</p>`;
+  }
+  return `<div class="eyebrow">Your plan</div>
+    ${cur ? '' : '<p class="note" style="margin:8px 0">Pick your Claude plan so savings can be shown against it.</p>'}
+    <div class="seg plan-seg" role="group" aria-label="Claude plan">${plans.map(p => `<button type="button" data-plan="${h(p.id)}" class="${(p.id === cur && !(dash.customOpen && cur !== 'custom')) || (p.id === 'custom' && showCustom) ? 'on' : ''}" aria-pressed="${p.id === cur}"${dash.savingPlan ? ' disabled' : ''}>${h(p.name)}</button>`).join('')}</div>
+    ${showCustom ? `<form class="row pcustom" id="planCustom"><label class="sr" for="planPrice">Monthly price in USD</label>
+      <span class="muted">$</span><input id="planPrice" type="number" min="0" step="1" inputmode="decimal" placeholder="e.g. 50" value="${u.plan && u.plan.id === 'custom' && u.plan.price_usd ? h(u.plan.price_usd) : ''}">
+      <span class="muted small">/ month</span><button class="btn primary sm" type="submit"${dash.savingPlan ? ' disabled' : ''}>Save</button></form>` : ''}
+    ${u.plan ? `<p class="muted small" style="margin:8px 0 0">${h(u.plan.name)}${u.plan.price_usd ? ' · ' + h(fmtMoney(u.plan.price_usd)) + '/month' : ''}${u.plan.multiple ? ' · ' + h(u.plan.multiple) + '× Pro usage' : ''}</p>` : ''}
+    ${worth}`;
+}
+async function savePlan(id, price) {
+  if (dash.savingPlan) return;
+  dash.savingPlan = true; paintDash();
+  try {
+    const s = await api('GET', '/api/settings');
+    const body = Object.assign({}, s, { plan: id });
+    if (id === 'custom') body.plan_price = price;
+    await api('PUT', '/api/settings', body);
+    dash.customOpen = false;
+    toast('Plan saved', 'ok');
+    await loadUsage();
+  } catch (e) { toast(e.message || String(e), 'err'); }
+  finally { dash.savingPlan = false; paintDash(); }
+}
+
+/* ---- offload KPIs ---- */
+function kpiHTML(u) {
+  const seg = `<div class="seg" role="group" aria-label="Period">${['today', '7d', '30d'].map(k => `<button type="button" data-period="${k}" class="${dash.period === k ? 'on' : ''}" aria-pressed="${dash.period === k}">${PERIOD_LABEL[k]}</button>`).join('')}</div>`;
+  const head = `<div class="bar dhead"><h3>Offload</h3><span class="muted small">work sent to other providers instead of your subscription</span><div class="grow"></div>${seg}</div>`;
+  if (!u) return head + '<div class="loading">…</div>';
+  const p = (u.periods || []).find(x => x.name === dash.period) || { anthropic: {}, routed: {}, offload: 0 };
+  const a = p.anthropic || {}, r = p.routed || {};
+  const at = tokSum(a.tokens), rt = tokSum(r.tokens);
+  const reqTot = (a.requests || 0) + (r.requests || 0);
+  const tile = (k, v, sub) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div><div class="sub">${sub}</div></div>`;
+  return head + `<div class="stats">
+      ${tile('Share offloaded', h(fmtPct(p.offload, true)), 'of API-equivalent value')}
+      ${tile('Routed tokens', h(fmtCompact(rt)), `vs ${h(fmtCompact(at))} on subscription`)}
+      ${tile('Requests routed', h(fmtNum(r.requests || 0)), `of ${h(fmtNum(reqTot))} total`)}
+      ${tile('Value routed', h(fmtMoney(r.cost_usd)), `vs ${h(fmtMoney(a.cost_usd))} on subscription`)}
+    </div>
+    <div class="panel split">
+      <div class="bar" style="margin-bottom:8px"><b>Subscription vs routed</b><span class="muted small">${h(PERIOD_LABEL[dash.period].toLowerCase())}</span><div class="grow"></div>
+        <div class="legend small"><span><i class="sw-sub"></i>Subscription</span><span><i class="sw-routed"></i>Routed</span></div></div>
+      ${splitBar('Value', a.cost_usd || 0, r.cost_usd || 0, fmtMoney)}
+      ${splitBar('Tokens', at, rt, fmtCompact)}
+      ${!r.requests ? `<p class="muted small" style="margin:6px 0 0">Nothing routed in this period. ${ROUTE_CTA}</p>` : ''}
+    </div>`;
+}
+function splitBar(label, a, r, fmt) {
+  const t = a + r;
+  const pa = t ? a / t * 100 : 0, pr = t ? 100 - pa : 0;
+  const aria = t ? `${label}: subscription ${fmt(a)} (${Math.round(pa)}%), routed ${fmt(r)} (${Math.round(pr)}%)` : `${label}: no traffic`;
+  return `<div class="sbar-row"><span class="sbar-k">${h(label)}</span>
+    <div class="sbar" role="img" aria-label="${h(aria)}">${t ? `${pa > 0 ? `<div class="s-sub" style="flex-basis:${pa}%" title="Subscription ${h(fmt(a))}"></div>` : ''}${pr > 0 ? `<div class="s-routed" style="flex-basis:${pr}%" title="Routed ${h(fmt(r))}"></div>` : ''}` : ''}</div>
+    <span class="sbar-v">${t ? `${h(Math.round(pa))}% · <b>${h(pr > 0 && pr < 1 ? pr.toFixed(1) : Math.round(pr))}% routed</b>` : '<span class="muted">no traffic</span>'}</span></div>`;
+}
+
+/* ---- 30-day chart ---- */
+/* 4 gridline steps on a 1-2-5 scale. */
+function niceStep(v) {
+  if (v <= 0) return 0;
+  const raw = v / 4, e = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / e;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * e;
+}
+function dayLabel(ds, long) {
+  const m = /^(\d+)-(\d+)-(\d+)$/.exec(ds || '');
+  if (!m) return ds || '';
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  return d.toLocaleDateString('en-US', long ? { weekday: 'short', month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric' });
+}
+function chartHTML(u, cw) {
+  const toggle = `<div class="seg" role="group" aria-label="Measure">${[['usd', 'Value'], ['tokens', 'Tokens']].map(([k, l]) => `<button type="button" data-cmode="${k}" class="${dash.chartMode === k ? 'on' : ''}" aria-pressed="${dash.chartMode === k}">${l}</button>`).join('')}</div>`;
+  const head = `<div class="bar" style="margin-bottom:4px"><h3>Last 30 days</h3><div class="grow"></div>${toggle}</div>
+    <div class="legend small" style="margin-bottom:6px"><span><i class="sw-sub"></i>Subscription</span><span><i class="sw-routed"></i>Routed</span>
+      <span class="muted">${dash.chartMode === 'usd' ? 'API-equivalent value per day' : 'tokens per day, incl. cache'}</span></div>`;
+  if (!u) return head + '<div class="loading">…</div>';
+  const days = u.days || [];
+  const tok = dash.chartMode === 'tokens';
+  const fmt = tok ? fmtCompact : fmtMoney;
+  const rows = days.map(d => ({ date: d.date, a: Number(tok ? d.anthropic_tokens : d.anthropic_usd) || 0, r: Number(tok ? d.routed_tokens : d.routed_usd) || 0 }));
+  const W = Math.max(300, (cw || 700) - 30), H = 210;
+  const ml = 46, mr = 6, mt = 10, mb = 24;
+  const iw = W - ml - mr, ih = H - mt - mb;
+  const peak = Math.max(0, ...rows.map(x => x.a + x.r));
+  const stp = niceStep(peak), nt = stp ? Math.ceil(peak / stp) : 0, max = stp * nt;
+  const n = rows.length || 30, slot = iw / n;
+  const bw = Math.max(2, Math.min(18, slot - 2));
+  const y = v => mt + ih - (max ? v / max * ih : 0);
+  const axisFmt = v => (tok ? fmtCompact(v) : v === 0 ? '$0' : '$' + (v < 1 ? (+v.toFixed(3)).toString() : v < 10 ? (+v.toFixed(1)).toString() : fmtCompact(v)));
+  let g = '';
+  if (max) for (let i = 0; i <= nt; i++) {
+    const v = stp * i, yy = y(v).toFixed(1);
+    g += `<line class="${i ? 'grid' : 'base'}" x1="${ml}" x2="${W - mr}" y1="${yy}" y2="${yy}"/><text class="tick" x="${ml - 6}" y="${yy}" dy="0.32em" text-anchor="end">${h(axisFmt(v))}</text>`;
+  } else g += `<line class="base" x1="${ml}" x2="${W - mr}" y1="${mt + ih}" y2="${mt + ih}"/>`;
+  const topPath = (x, yt, w, hh) => {
+    const r = Math.min(4, w / 2, hh);
+    return `M${x},${yt + hh}V${yt + r}Q${x},${yt} ${x + r},${yt}H${x + w - r}Q${x + w},${yt} ${x + w},${yt + r}V${yt + hh}Z`;
+  };
+  let bars = '', hits = '', labels = '';
+  const step = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(iw / 60))));
+  rows.forEach((d, i) => {
+    const x = ml + i * slot + (slot - bw) / 2;
+    const base = mt + ih;
+    if (max && d.a + d.r > 0) {
+      const ha = d.a / max * ih, hr = d.r / max * ih;
+      if (ha > 0) bars += hr > 0 ? `<rect class="b-sub" x="${x.toFixed(1)}" y="${(base - ha).toFixed(1)}" width="${bw.toFixed(1)}" height="${ha.toFixed(1)}"/>`
+        : `<path class="b-sub" d="${topPath(x, base - Math.max(ha, 1), bw, Math.max(ha, 1))}"/>`;
+      if (hr > 0) {
+        const gap = ha > 0 ? 2 : 0;
+        const hh = Math.max(1, hr - gap);
+        bars += `<path class="b-routed" d="${topPath(x, base - ha - gap - hh, bw, hh)}"/>`;
+      }
+    }
+    hits += `<rect class="hit" data-i="${i}" x="${(ml + i * slot).toFixed(1)}" y="${mt}" width="${slot.toFixed(1)}" height="${ih}" aria-label="${h(dayLabel(d.date, true))}: subscription ${h(fmt(d.a))}, routed ${h(fmt(d.r))}"/>`;
+    if ((n - 1 - i) % step === 0) labels += `<text class="tick" x="${(i === n - 1 ? W - mr : ml + i * slot + slot / 2).toFixed(1)}" y="${H - 6}" text-anchor="${i === n - 1 ? 'end' : 'middle'}">${h(i === n - 1 ? 'Today' : dayLabel(d.date))}</text>`;
+  });
+  const empty = !max ? `<text class="emptyt" x="${ml + iw / 2}" y="${mt + ih / 2}" text-anchor="middle">No traffic in the last 30 days</text>` : '';
+  const totA = rows.reduce((s, x) => s + x.a, 0), totR = rows.reduce((s, x) => s + x.r, 0);
+  const desc = `Stacked daily bars for the last 30 days. Subscription total ${fmt(totA)}, routed total ${fmt(totR)}.`;
+  dash.chartRows = { rows, fmt };
+  return head + `<div class="chartwrap">
+    <svg class="chart" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-labelledby="chT chD">
+      <title id="chT">Subscription vs routed, last 30 days</title><desc id="chD">${h(desc)}</desc>
+      ${g}${bars}${labels}${empty}<g class="hits">${hits}</g></svg>
+    <div class="tip" id="chTip" hidden></div></div>
+    <details class="adv" data-k="chtable" style="margin:6px 0 0"><summary>Show as table</summary>
+      <div class="tablewrap" style="max-height:260px;overflow:auto"><table><thead><tr><th>Day</th><th class="num">Subscription</th><th class="num">Routed</th><th class="num">Routed share</th></tr></thead><tbody>
+      ${rows.slice().reverse().map(d => `<tr><td>${h(dayLabel(d.date, true))}</td><td class="num">${h(fmt(d.a))}</td><td class="num">${h(fmt(d.r))}</td><td class="num">${d.a + d.r ? h(Math.round(d.r / (d.a + d.r) * 100)) + '%' : '–'}</td></tr>`).join('')}
+      </tbody></table></div></details>`;
+}
+function chartHover(e) {
+  const tip = $('#chTip'); if (!tip || !dash.chartRows) return;
+  const hit = e.target.closest && e.target.closest('rect.hit');
+  $$('#d-chart rect.hit.on').forEach(r => r !== hit && r.classList.remove('on'));
+  if (!hit) { tip.hidden = true; return; }
+  hit.classList.add('on');
+  const d = dash.chartRows.rows[Number(hit.dataset.i)], fmt = dash.chartRows.fmt;
+  if (!d) return;
+  const t = d.a + d.r;
+  tip.innerHTML = `<b>${h(dayLabel(d.date, true))}</b>
+    <div><i class="sw-sub"></i>Subscription <span>${h(fmt(d.a))}</span></div>
+    <div><i class="sw-routed"></i>Routed <span>${h(fmt(d.r))}</span></div>
+    ${t ? `<div class="muted">${h(Math.round(d.r / t * 100))}% routed</div>` : ''}`;
+  tip.hidden = false;
+  const wrap = tip.parentElement.getBoundingClientRect(), hr = hit.getBoundingClientRect();
+  const tw = tip.offsetWidth;
+  let left = hr.left - wrap.left + hr.width / 2 - tw / 2;
+  left = Math.max(0, Math.min(wrap.width - tw, left));
+  tip.style.left = left + 'px';
+  tip.style.top = '4px';
+}
+
+/* ---- top sources ---- */
+function sourcesHTML(u) {
+  const head = '<div class="bar dhead"><h3>Top routed agents and rules</h3><span class="muted small">last 30 days</span></div>';
+  if (!u) return head + '<div class="loading">…</div>';
+  const src = (u.sources || []).slice(0, 10);
+  if (!src.length) return head + `<div class="empty">Nothing routed in the last 30 days. ${ROUTE_CTA}</div>`;
+  const tot = src.reduce((s, x) => s + (x.cost_usd || 0), 0) || 1;
+  return head + `<div class="tablewrap"><table class="srct"><thead><tr><th>Source</th><th>Runs on</th><th class="num">Requests</th><th class="num">Tokens</th><th class="num">Value</th><th>Share of value</th></tr></thead><tbody>
+    ${src.map(x => {
+      const sh = (x.cost_usd || 0) / tot * 100;
+      return `<tr><td>${sourceLabel(x.source)}</td><td class="mono">${h(x.target)}</td><td class="num">${h(fmtNum(x.requests))}</td><td class="num">${h(fmtCompact(x.tokens))}</td><td class="num">${h(fmtMoney(x.cost_usd))}</td>
+        <td><div class="share"><div class="sharebar"><i style="width:${sh.toFixed(1)}%"></i></div><span>${h(Math.round(sh))}%</span></div></td></tr>`;
     }).join('')}</tbody></table></div>`;
 }
+
+/* ---- status + agents ---- */
+function statusHTML(s) {
+  const cmd = s.launch_cmd || 'claude-hybrid';
+  return `<div class="bar dhead"><h3>Proxy</h3><span class="badge ok">● Running</span><div class="grow"></div><span class="muted small">up <span data-live="uptime"></span></span></div>
+    <div class="mini"><div><span data-live="req">0</span><small>requests</small></div><div><span data-live="routed">0</span><small>routed</small></div><div><span data-live="errors">0</span><small>errors</small></div></div>
+    <p class="muted small" style="margin:0 0 8px">Since the proxy started.</p>
+    <div class="kv"><div>Proxy</div><div><code>${h(s.proxy_listen)}</code></div><div>Panel</div><div><code>${h(s.panel_listen)}</code></div></div>
+    <details class="adv" data-k="howstart" style="margin:10px 0 0"><summary>How to start</summary>
+      <div class="cmd"><code>${h(cmd)}</code><button class="btn sm" type="button" data-copy>Copy</button></div>
+      <p class="hint" style="margin:0 0 8px">Run <code>${h(cmd)}</code> instead of <code>claude</code>. It starts Claude Code with <code>ANTHROPIC_BASE_URL</code> pointing at this proxy.
+        Normal requests still use your subscription. Routed agents and rules go to your providers.</p>
+      <div class="kv small"><div>Config</div><div><code>${h(s.config_path)}</code></div><div>Agents dir</div><div><code>${h(s.agents_dir)}</code></div></div>
+    </details>`;
+}
+function routedAgentsHTML() {
+  const head = '<div class="bar dhead"><h3>Routed agents</h3><div class="grow"></div><a href="#agents" class="small">Agents →</a></div>';
+  const ra = state.agents.filter(a => a.route && a.route.provider).sort((a, b) => a.name.localeCompare(b.name));
+  if (!ra.length) return head + `<div class="empty">All agents use your subscription. <a href="#agents">Pick where agents run →</a></div>`;
+  return head + `<ul class="alist">${ra.map(a => {
+    const p = state.providers.find(x => x.id === a.route.provider);
+    return `<li><span class="cdot" style="background:${COLORS[a.color] || 'transparent'}"></span><b>${h(a.name)}</b><span class="grow"></span>
+      <span class="muted small">${h(p ? p.name || p.id : a.route.provider)} / <span class="mono">${h(a.route.model || 'same model')}</span></span></li>`;
+  }).join('')}</ul>`;
+}
+function howHTML(u) {
+  if (!u) return '';
+  const as = u.assumptions || [];
+  return `<details class="adv how" data-k="how"><summary>How is this calculated?</summary>
+    <ul>${as.map(x => `<li>${h(x)}</li>`).join('')}
+    ${u.cache_hit_rate != null ? `<li>Cache-hit rate on your subscription: ${h(fmtPct(u.cache_hit_rate))}.</li>` : ''}
+    <li>“pts saved” = estimated limit use without routing minus current use, in percentage points.</li></ul></details>`;
+}
+
+/* Delegated handlers, bound once per dashboard mount. */
+function bindDash(root) {
+  root.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b || b.disabled) return;
+    if (b.dataset.plan) {
+      const id = b.dataset.plan;
+      if (id === 'custom') {
+        dash.customOpen = true; paintDash();
+        const i = $('#planPrice'); if (i) i.focus();
+        return;
+      }
+      dash.customOpen = false;
+      if (!dash.usage || !dash.usage.plan || dash.usage.plan.id !== id) savePlan(id); else paintDash();
+    } else if (b.dataset.period) {
+      dash.period = b.dataset.period; store.set('chr_dash_period', dash.period); paintDash();
+    } else if (b.dataset.cmode) {
+      dash.chartMode = b.dataset.cmode; store.set('chr_dash_chart', dash.chartMode); paintDash();
+    } else if ('copy' in b.dataset) {
+      copyText((state.status && state.status.launch_cmd) || 'claude-hybrid');
+    }
+  });
+  root.addEventListener('submit', e => {
+    if (e.target.id !== 'planCustom') return;
+    e.preventDefault();
+    const v = parseFloat($('#planPrice').value);
+    if (!(v > 0)) { toast('Enter your monthly price in USD', 'err'); return; }
+    savePlan('custom', v);
+  });
+  root.addEventListener('mousemove', chartHover);
+  root.addEventListener('mouseleave', () => { const t = $('#chTip'); if (t) t.hidden = true; }, true);
+  root.addEventListener('pointerleave', e => { if (e.target.matches && e.target.matches('svg.chart')) { const t = $('#chTip'); if (t) t.hidden = true; $$('#d-chart rect.hit.on').forEach(r => r.classList.remove('on')); } }, true);
+}
+let dashResizeT = null;
+window.addEventListener('resize', () => { clearTimeout(dashResizeT); dashResizeT = setTimeout(() => { if (curTab() === 'dashboard') paintDash(); }, 150); });
 
 /* ---------- logs ---------- */
 function logTarget(e) {
@@ -630,9 +1130,22 @@ setInterval(async () => {
   try {
     const fresh = await fetchLogs();
     if (t === 'dashboard' && curTab() === 'dashboard') {
-      if (++tickN % 3 === 0 || fresh) await loadStatus();
+      if (++tickN % 3 === 0 || fresh) {
+        const before = state.lastLogId;
+        await loadStatus();
+        if (state.lastLogId < before) await fetchLogs();
+      }
+      if (Date.now() - dash.usageAt > 30000) await loadUsage();
       paintDash();
-    } else if (t === 'logs' && curTab() === 'logs' && fresh && !state.paused) paintLogs();
+    } else if (t === 'logs' && curTab() === 'logs') {
+      let changed = fresh;
+      if (++tickN % 3 === 0) {
+        const before = state.lastLogId;
+        await loadStatus();
+        if (state.lastLogId < before) { await fetchLogs(); changed = true; }
+      }
+      if (changed && !state.paused) paintLogs();
+    }
   } catch (e) { /* offline indicator handles it */ }
   finally { polling = false; }
 }, 2000);

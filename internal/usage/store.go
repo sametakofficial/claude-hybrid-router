@@ -62,10 +62,23 @@ type Limits struct {
 	Windows map[string]Window `json:"windows"`
 }
 
+// sample is one utilization reading together with how much subscription
+// value had been seen by then. Two samples in the same window give the rate
+// "points of the limit per USD" without guessing the plan's quota.
+type sample struct {
+	Time    time.Time `json:"t"`
+	Util    float64   `json:"u"`
+	ResetAt int64     `json:"r"`
+	CumUSD  float64   `json:"c"`
+}
+
 type fileFormat struct {
-	Version int      `json:"version"`
-	Buckets []bucket `json:"buckets"`
-	Limits  Limits   `json:"limits"`
+	Version int                 `json:"version"`
+	Buckets []bucket            `json:"buckets"`
+	Limits  Limits              `json:"limits"`
+	CumUSD  float64             `json:"cum_usd"`
+	Samples map[string][]sample `json:"samples"`
+	Rates   map[string]float64  `json:"rates"` // last good rate per window
 }
 
 // Store is safe for concurrent use. It saves itself every few seconds.
@@ -75,6 +88,9 @@ type Store struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
 	limits  Limits
+	cumUSD  float64             // running API-equivalent value of subscription traffic
+	samples map[string][]sample // per window
+	rates   map[string]float64  // last calibrated rate per window (utilization per USD)
 	dirty   bool
 	stop    chan struct{}
 	done    chan struct{}
@@ -82,7 +98,8 @@ type Store struct {
 
 // Open loads path (a missing file is fine) and starts the save loop.
 func Open(path string) (*Store, error) {
-	s := &Store{path: path, buckets: map[string]*bucket{}, stop: make(chan struct{}), done: make(chan struct{})}
+	s := &Store{path: path, buckets: map[string]*bucket{}, samples: map[string][]sample{}, rates: map[string]float64{},
+		stop: make(chan struct{}), done: make(chan struct{})}
 	if data, err := os.ReadFile(path); err == nil {
 		var f fileFormat
 		if err := json.Unmarshal(data, &f); err == nil {
@@ -91,6 +108,13 @@ func Open(path string) (*Store, error) {
 				s.buckets[b.key()] = &b
 			}
 			s.limits = f.Limits
+			s.cumUSD = f.CumUSD
+			if f.Samples != nil {
+				s.samples = f.Samples
+			}
+			if f.Rates != nil {
+				s.rates = f.Rates
+			}
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
@@ -141,6 +165,10 @@ func (s *Store) Add(r Record) {
 		cur.Errors++
 	}
 	cur.Tokens.add(r.Tokens)
+	if r.Kind == "anthropic" {
+		p, _ := PriceFor(r.ReqModel)
+		s.cumUSD += r.Tokens.Cost(p)
+	}
 	s.dirty = true
 }
 
@@ -207,8 +235,88 @@ func (s *Store) ObserveHeaders(h http.Header) {
 			w.ResetAt = old.ResetAt
 		}
 		s.limits.Windows[name] = w
+		s.addSample(name, sample{Time: now, Util: w.Utilization, ResetAt: w.ResetAt, CumUSD: s.cumUSD})
 	}
 	s.dirty = true
+}
+
+const maxSamples = 500
+
+// addSample stores a reading; unchanged readings only move the last one.
+// Caller holds s.mu.
+func (s *Store) addSample(window string, x sample) {
+	list := s.samples[window]
+	if n := len(list); n >= 2 && list[n-1].Util == x.Util && list[n-2].Util == x.Util && list[n-1].ResetAt == x.ResetAt {
+		list[n-1] = x
+	} else {
+		list = append(list, x)
+	}
+	if len(list) > maxSamples {
+		list = list[len(list)-maxSamples:]
+	}
+	s.samples[window] = list
+	if r, ok := rateFrom(list, x.ResetAt); ok {
+		s.rates[window] = r
+	}
+}
+
+// minRise is how much utilization must rise inside one window before the
+// rate is trusted (Anthropic reports two decimals).
+const minRise = 0.03
+
+// rateFrom measures utilization gained per USD within the window that
+// resets at resetAt.
+func rateFrom(list []sample, resetAt int64) (float64, bool) {
+	var first, last *sample
+	for i := range list {
+		if list[i].ResetAt != resetAt {
+			continue
+		}
+		if first == nil {
+			first = &list[i]
+		}
+		last = &list[i]
+	}
+	if first == nil || last == first {
+		return 0, false
+	}
+	du, dc := last.Util-first.Util, last.CumUSD-first.CumUSD
+	if du < minRise || dc <= 0 {
+		return 0, false
+	}
+	return du / dc, true
+}
+
+// calibration returns the rate for a window and how far along calibration
+// is (0..1) when there is no rate yet.
+func (s *Store) calibration(window string, resetAt int64) (rate float64, ok bool, progress float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r, ok := rateFrom(s.samples[window], resetAt); ok {
+		return r, true, 1
+	}
+	if r := s.rates[window]; r > 0 {
+		return r, true, 1
+	}
+	var first, last *sample
+	for i, x := range s.samples[window] {
+		if x.ResetAt == resetAt {
+			if first == nil {
+				first = &s.samples[window][i]
+			}
+			last = &s.samples[window][i]
+		}
+	}
+	if first != nil {
+		progress = (last.Util - first.Util) / minRise
+		if progress < 0 {
+			progress = 0
+		}
+		if progress > 1 {
+			progress = 1
+		}
+	}
+	return 0, false, progress
 }
 
 // Save writes the file if anything changed (atomic, 0600).
@@ -219,7 +327,7 @@ func (s *Store) Save() error {
 		return nil
 	}
 	cutoff := time.Now().Add(-keepFor).Unix() / 3600
-	f := fileFormat{Version: 1, Limits: s.limits}
+	f := fileFormat{Version: 1, Limits: s.limits, CumUSD: s.cumUSD, Samples: s.samples, Rates: s.rates}
 	for k, b := range s.buckets {
 		if b.Hour < cutoff {
 			delete(s.buckets, k)
@@ -231,7 +339,9 @@ func (s *Store) Save() error {
 	s.mu.Unlock()
 
 	sort.Slice(f.Buckets, func(i, j int) bool { return f.Buckets[i].key() < f.Buckets[j].key() })
+	s.mu.Lock()
 	data, err := json.Marshal(f)
+	s.mu.Unlock()
 	if err != nil {
 		return err
 	}

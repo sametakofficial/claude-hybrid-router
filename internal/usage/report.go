@@ -33,7 +33,9 @@ type WindowReport struct {
 	Period      Period    `json:"period"`      // usage inside this window
 	Without     float64   `json:"without"`     // estimated utilization with no routing
 	Saved       float64   `json:"saved"`       // Without - Utilization
-	Calibrated  bool      `json:"calibrated"`  // enough Anthropic traffic to estimate
+	Calibrated  bool      `json:"calibrated"`  // a rate has been measured
+	Calibration float64   `json:"calibration"` // 0..1 progress while not calibrated
+	Rate        float64   `json:"rate"`        // utilization per USD of subscription value
 	Note        string    `json:"note,omitempty"`
 }
 
@@ -204,21 +206,19 @@ func (s *Store) Build(now time.Time, plan *Plan) Report {
 		}
 		wr := WindowReport{Name: name, Label: label, Utilization: w.Utilization, ResetAt: w.ResetAt, Start: start, SeenAt: w.SeenAt}
 		wr.Period = sumPeriod(name, bs, start.Unix()/3600, shape, haveShape)
-		a, rt := wr.Period.Anthropic.CostUSD, wr.Period.Routed.CostUSD
+		rate, ok, progress := s.calibration(name, w.ResetAt)
 		switch {
 		case w.ResetAt > 0 && time.Unix(w.ResetAt, 0).Before(now):
 			wr.Note = "This window has reset since Anthropic last reported it."
-		case a <= 0 || w.Utilization <= 0:
-			wr.Note = "Not enough subscription traffic in this window yet."
+		case !ok:
+			wr.Calibration = progress
+			wr.Note = "Calibrating: claude-hybrid learns how fast this limit fills by watching it rise while you use Claude Code."
 		default:
-			// Utilization is assumed to grow with the API-equivalent value
-			// of what you send. Routed value, converted at that rate:
-			wr.Calibrated = true
-			wr.Without = w.Utilization * (a + rt) / a
-			wr.Saved = wr.Without - w.Utilization
-			if w.Utilization < 0.02 {
-				wr.Note = "Low usage so far; the estimate gets better as you use Claude."
-			}
+			// Routed value converted at the measured rate. Only routed work
+			// inside this window counts.
+			wr.Calibrated, wr.Calibration, wr.Rate = true, 1, rate
+			wr.Saved = wr.Period.Routed.CostUSD * rate
+			wr.Without = w.Utilization + wr.Saved
 		}
 		r.Windows = append(r.Windows, wr)
 	}
@@ -282,8 +282,8 @@ func (s *Store) Build(now time.Time, plan *Plan) Report {
 	r.Assumptions = []string{
 		"Token values use Anthropic API list prices of the Claude model Claude Code asked for.",
 		"Routed input is counted with the cache-hit rate seen on your subscription traffic, since providers often report no cache.",
-		"Limit estimates assume your subscription usage grows with that value and that this machine is where you use Claude Code most.",
-		"Usage from claude.ai or other computers counts toward Anthropic's limits but is not seen here.",
+		"The limit rate is measured: how many points a window rose per dollar of subscription traffic seen here.",
+		"Usage from claude.ai or other computers also raises the limit, which makes the measured rate (and the savings) look higher.",
 	}
 	return r
 }

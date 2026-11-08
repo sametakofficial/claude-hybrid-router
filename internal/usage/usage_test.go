@@ -53,18 +53,30 @@ func TestObserveHeaders(t *testing.T) {
 	}
 }
 
+func limitHeader(util string, reset int64) http.Header {
+	h := http.Header{}
+	h.Set("Anthropic-Ratelimit-Unified-7d-Utilization", util)
+	h.Set("Anthropic-Ratelimit-Unified-7d-Reset", strconv.FormatInt(reset, 10))
+	return h
+}
+
 func TestReportEstimatesSavings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "u.json")
 	s, _ := Open(path)
 	now := time.Now()
-	// Subscription traffic: 1M uncached input on Opus 5.5 = $4.
+	reset := now.Add(24 * time.Hour).Unix()
+
+	// Before any traffic the limit is already 60% used (from earlier work
+	// we never saw). That must not inflate the estimate.
+	s.ObserveHeaders(limitHeader("0.60", reset))
+	if w := s.Build(now, nil).Windows[0]; w.Calibrated {
+		t.Fatal("one reading cannot calibrate")
+	}
+	// $4 of subscription traffic (1M uncached input on Opus 5.5) raises it 4 points.
 	s.Add(Record{Time: now.Add(-time.Hour), Kind: "anthropic", ReqModel: "claude-opus-5-5", Tokens: Tokens{Input: 1_000_000}})
+	s.ObserveHeaders(limitHeader("0.64", reset))
 	// Routed: 1M output that would have been Opus 5.5 = $20.
 	s.Add(Record{Time: now.Add(-time.Hour), Kind: "routed", Source: "agent:coder", Provider: "letum", Model: "letum", ReqModel: "claude-opus-5-5", Tokens: Tokens{Output: 1_000_000}})
-	h := http.Header{}
-	h.Set("Anthropic-Ratelimit-Unified-7d-Utilization", "0.10")
-	h.Set("Anthropic-Ratelimit-Unified-7d-Reset", strconv.FormatInt(now.Add(24*time.Hour).Unix(), 10))
-	s.ObserveHeaders(h)
 
 	plan, _ := PlanByID("max5", 0)
 	r := s.Build(now, &plan)
@@ -72,9 +84,9 @@ func TestReportEstimatesSavings(t *testing.T) {
 		t.Fatalf("windows %+v", r.Windows)
 	}
 	w := r.Windows[0]
-	// $4 used 10%, so $20 more would have used 50% more: 60% total.
-	if !near(w.Without, 0.6) || !near(w.Saved, 0.5) {
-		t.Fatalf("without=%v saved=%v", w.Without, w.Saved)
+	// 4 points per $4 = 1 point per $1, so $20 routed saved 20 points.
+	if !near(w.Rate, 0.01) || !near(w.Saved, 0.20) || !near(w.Without, 0.84) {
+		t.Fatalf("rate=%v saved=%v without=%v", w.Rate, w.Saved, w.Without)
 	}
 	if p := r.Periods[1]; !near(p.Offload, 20.0/24.0) {
 		t.Fatalf("offload %v", p.Offload)
@@ -86,12 +98,26 @@ func TestReportEstimatesSavings(t *testing.T) {
 		t.Fatalf("plan value %v", r.PlanValueRatio)
 	}
 
-	// Persists across restarts.
+	// Rate and totals persist across restarts.
 	s.Close()
 	s2, _ := Open(path)
 	defer s2.Close()
-	if r2 := s2.Build(now, nil); !near(r2.Periods[1].Routed.CostUSD, 20) || len(r2.Windows) != 1 {
-		t.Fatalf("not persisted: %+v", r2.Periods[1])
+	r2 := s2.Build(now, nil)
+	if !near(r2.Periods[1].Routed.CostUSD, 20) || len(r2.Windows) != 1 || !near(r2.Windows[0].Rate, 0.01) {
+		t.Fatalf("not persisted: %+v %+v", r2.Periods[1], r2.Windows)
+	}
+}
+
+func TestSmallRiseIsStillCalibrating(t *testing.T) {
+	s, _ := Open(filepath.Join(t.TempDir(), "u.json"))
+	defer s.Close()
+	reset := time.Now().Add(time.Hour).Unix()
+	s.ObserveHeaders(limitHeader("0.10", reset))
+	s.Add(Record{Kind: "anthropic", ReqModel: "claude-opus-5-5", Tokens: Tokens{Input: 100_000}})
+	s.ObserveHeaders(limitHeader("0.11", reset))
+	w := s.Build(time.Now(), nil).Windows[0]
+	if w.Calibrated || w.Saved != 0 || !near(w.Calibration, 1.0/3) {
+		t.Fatalf("%+v", w)
 	}
 }
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.0
+
+- Dashboard: subscription limit (from Anthropic's rate-limit headers) with
+  "pts saved" per window, plan picker, offload share, 30-day chart, top
+  routed agents. Savings use a measured rate (limit points per USD seen
+  here); until the limit has risen 3 points the dashboard says calibrating.
+- usage.json keeps 40 days of hourly totals.
+- Security fixes from the audit (see commit c77bcde).
+
 ## 2.1.0
 
 - Panel: everything is picked from lists. Provider models load automatically
