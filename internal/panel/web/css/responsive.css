@@ -1,0 +1,23 @@
+@media (max-width:760px){
+  .top{flex-wrap:wrap;gap:6px 10px;padding:8px 12px}
+  nav#tabs{order:3;flex-basis:100%;gap:4px}
+  nav#tabs a{padding:6px 9px;background:var(--panel2)}
+  nav#tabs a.active{background:var(--accent-soft)}
+  .brand{flex:1}
+  .stats{grid-template-columns:1fr 1fr}
+  .grid2,.grid3{grid-template-columns:1fr}
+  main{padding:14px 12px 60px}
+  dialog.modal,dialog.modal.wide{width:100%;max-width:100%;height:100%;max-height:100%;border-radius:0;border:0;margin:0}
+  .dgrid.top2,.dgrid.half{grid-template-columns:1fr}
+  .hero{padding:14px}
+  .hero-fig .big{font-size:48px}
+  #d-kpi .dhead .small{display:none}
+}
+@media (max-width:560px){
+  .srct th:nth-child(3),.srct td:nth-child(3),.srct th:nth-child(4),.srct td:nth-child(4){display:none}
+  .srct .share{min-width:80px}
+}
+@media (max-width:420px){
+  .sbar-row{grid-template-columns:48px minmax(0,1fr)}
+  .sbar-v{grid-column:2}
+}
