@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,9 +66,34 @@ func (d Dir) Get(name string) (Agent, error) {
 
 func (d Dir) file(name string) string { return filepath.Join(d.Path, name+".md") }
 
-// Save writes an agent. If oldName is set and differs, the old file is moved
-// to the trash after the new one is written. Unedited frontmatter keys of the
-// existing file are kept.
+// ErrExists is returned when a rename would overwrite another agent.
+var ErrExists = errors.New("an agent with that name already exists")
+
+// Conflict reports whether saving oldName as newName would overwrite a
+// different agent. A rename that only changes letter case is not a
+// conflict, also on case-insensitive filesystems where both names open the
+// same file.
+func (d Dir) Conflict(oldName, newName string) bool {
+	if oldName == newName {
+		return false
+	}
+	nfi, err := os.Stat(d.file(newName))
+	if err != nil {
+		return false
+	}
+	ofi, err := os.Stat(d.file(oldName))
+	return err != nil || !os.SameFile(nfi, ofi)
+}
+
+// Save writes an agent as NAME.md (frontmatter name and marker = NAME).
+// oldName is the agent's current name ("" or equal for a plain save); on a
+// rename the old file is moved to the trash, never left in place. Unedited
+// frontmatter keys of the existing file are kept.
+//
+// The content goes to a temp file first and is renamed into place, so a
+// reader never sees half a file. A case-only rename on a case-insensitive
+// filesystem (a.md -> A.md, one file) trashes the old file first, then
+// renames the temp file to the new name.
 func (d Dir) Save(oldName string, a Agent) (Agent, error) {
 	if oldName == "" {
 		oldName = a.Name
@@ -79,10 +105,15 @@ func (d Dir) Save(oldName string, a Agent) (Agent, error) {
 	if prev, err := d.Get(oldName); err == nil && a.Extra == nil {
 		a.Extra = prev.Extra
 	}
-	if oldName != a.Name {
-		if _, err := os.Stat(d.file(a.Name)); err == nil {
-			return Agent{}, fmt.Errorf("an agent named %q already exists", a.Name)
-		}
+	rename := oldName != a.Name
+	if rename && d.Conflict(oldName, a.Name) {
+		return Agent{}, fmt.Errorf("%w: %q", ErrExists, a.Name)
+	}
+	sameFile := false
+	if rename {
+		nfi, err1 := os.Stat(d.file(a.Name))
+		ofi, err2 := os.Stat(d.file(oldName))
+		sameFile = err1 == nil && err2 == nil && os.SameFile(nfi, ofi)
 	}
 	data, err := Render(a)
 	if err != nil {
@@ -91,17 +122,38 @@ func (d Dir) Save(oldName string, a Agent) (Agent, error) {
 	if err := os.MkdirAll(d.Path, 0o755); err != nil {
 		return Agent{}, err
 	}
+	tmp, err := os.CreateTemp(d.Path, ".claude-hybrid-*.tmp")
+	if err != nil {
+		return Agent{}, err
+	}
+	defer os.Remove(tmp.Name()) // our own temp file; gone after the rename
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return Agent{}, err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return Agent{}, err
+	}
+	if err := tmp.Close(); err != nil {
+		return Agent{}, err
+	}
 	a.File = d.file(a.Name)
-	tmp := a.File + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	var trashed string
+	if sameFile {
+		if trashed, err = d.Trash(oldName); err != nil {
+			return Agent{}, err
+		}
+	}
+	if err := os.Rename(tmp.Name(), a.File); err != nil {
+		if trashed != "" {
+			os.Rename(trashed, d.file(oldName)) // put the old file back
+		}
 		return Agent{}, err
 	}
-	if err := os.Rename(tmp, a.File); err != nil {
-		return Agent{}, err
-	}
-	if oldName != a.Name {
+	if rename && !sameFile {
 		if _, err := d.Trash(oldName); err != nil && !os.IsNotExist(err) {
-			return a, err
+			return a, fmt.Errorf("saved %s.md, but could not move %s.md to the trash: %w", a.Name, oldName, err)
 		}
 	}
 	return a, nil

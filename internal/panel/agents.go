@@ -1,6 +1,8 @@
 package panel
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"sort"
@@ -74,7 +76,13 @@ func (p *Panel) checkRoute(rt config.Route) error {
 }
 
 // putAgent creates, edits, renames or recreates an agent file and sets its
-// route from the body. {name} in the path is the agent's current name.
+// route from the body. {name} in the path is the agent's current name (its
+// file name). After a save, file name, frontmatter name, marker and config
+// key are all the new name.
+//
+// The route is saved first (it is validated there), then the file. If the
+// file cannot be written, the previous routes are put back, so a failed
+// request changes nothing.
 func (p *Panel) putAgent(r *http.Request) (any, error) {
 	pathName := r.PathValue("name")
 	var in agentView
@@ -92,32 +100,68 @@ func (p *Panel) putAgent(r *http.Request) (any, error) {
 		return nil, bad("description is required: Claude uses it to decide when to call the agent")
 	}
 	rt := cleanRoute(in.Route)
-	if err := p.checkRoute(rt); err != nil { // before touching any file
+	if err := p.checkRoute(rt); err != nil {
 		return nil, err
 	}
 	a := in.Agent
 	a.Extra = nil // keep whatever the file already has
 	d := p.dir()
 	oldName := pathName
-	if !d.Exists(oldName) {
-		oldName = "" // new agent, or recreating a missing file
-		if d.Exists(a.Name) {
-			return nil, bad("an agent named %q already exists", a.Name)
+	var stale string // route key of a mismatched frontmatter name, now unused
+	if prev, err := d.Get(pathName); err == nil {
+		if prev.FrontName != "" && !d.Exists(prev.FrontName) {
+			stale = prev.FrontName
 		}
+	} else {
+		oldName = "" // new agent, or recreating a missing file
 	}
-	saved, err := d.Save(oldName, a)
-	if err != nil {
-		return nil, bad("%v", err)
+	if (oldName == "" && d.Exists(a.Name)) || (oldName != "" && d.Conflict(oldName, a.Name)) {
+		return nil, bad("an agent named %q already exists", a.Name)
+	}
+
+	// Routes before the change, to undo it if the file write fails.
+	before := map[string]*config.Route{}
+	for _, k := range []string{pathName, a.Name, stale} {
+		if k == "" {
+			continue
+		}
+		if old, ok := p.Store.Current().Agents[k]; ok {
+			before[k] = &old
+		} else {
+			before[k] = nil
+		}
 	}
 	cfg, err := p.Store.Update(func(c *config.Config) error {
-		if pathName != saved.Name {
+		if pathName != a.Name {
 			delete(c.Agents, pathName)
 		}
-		c.SetAgentRoute(saved.Name, rt)
+		if stale != "" && stale != a.Name {
+			delete(c.Agents, stale)
+		}
+		c.SetAgentRoute(a.Name, rt)
 		return nil
 	})
 	if err != nil {
-		return nil, bad("agent file saved, but routing was not: %v", err)
+		return nil, err // nothing changed
+	}
+	saved, err := d.Save(oldName, a)
+	if err != nil {
+		if _, rerr := p.Store.Update(func(c *config.Config) error {
+			for k, v := range before {
+				if v == nil {
+					delete(c.Agents, k)
+				} else {
+					c.Agents[k] = *v
+				}
+			}
+			return nil
+		}); rerr != nil {
+			return nil, apiError{http.StatusInternalServerError, fmt.Sprintf("the agent file was not saved (%v) and the route change could not be undone (%v): check config.yaml", err, rerr)}
+		}
+		if errors.Is(err, agents.ErrExists) {
+			return nil, bad("%v", err)
+		}
+		return nil, apiError{http.StatusInternalServerError, fmt.Sprintf("agent file not saved, nothing changed: %v", err)}
 	}
 	reloaded, err := d.Get(saved.Name)
 	if err != nil {
