@@ -15,21 +15,20 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sametakofficial/claude-hybrid-router/internal/anthropic"
 	"github.com/sametakofficial/claude-hybrid-router/internal/config"
+	"github.com/sametakofficial/claude-hybrid-router/internal/provider"
 	"github.com/sametakofficial/claude-hybrid-router/internal/router"
 	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
 	"github.com/sametakofficial/claude-hybrid-router/internal/translate"
 )
 
 const (
-	maxBody    = 64 << 20
-	maxRetries = 2
+	maxBody = 64 << 20
 	// HealthPath answers on the proxy port so the launcher can tell it is ours.
 	HealthPath = "/_claude-hybrid/health"
 )
@@ -38,7 +37,7 @@ const (
 type Proxy struct {
 	cfg    func() *config.Config
 	rec    *stats.Recorder
-	client *http.Client // for providers
+	client *provider.Client
 	up     *httputil.ReverseProxy
 
 	// OnUpstreamHeaders, if set, sees the response headers of every
@@ -48,21 +47,8 @@ type Proxy struct {
 
 // New builds a proxy. cfg must return the live config (treated read-only).
 func New(cfg func() *config.Config, rec *stats.Recorder) *Proxy {
-	timeout := time.Duration(cfg().Server.HeaderTimeout) * time.Second
-	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConnsPerHost:   16,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: timeout,
-	}
-	p := &Proxy{cfg: cfg, rec: rec, client: &http.Client{
-		Transport: transport,
-		// Never follow redirects with a provider key attached.
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}
+	transport := provider.NewTransport(time.Duration(cfg().Server.HeaderTimeout) * time.Second)
+	p := &Proxy{cfg: cfg, rec: rec, client: provider.NewClient(transport)}
 	p.up = &httputil.ReverseProxy{
 		Transport:     transport,
 		FlushInterval: -1, // flush every write: SSE must not be buffered
@@ -231,41 +217,6 @@ func (p *Proxy) fail(w http.ResponseWriter, e stats.Entry, code int, msg string,
 	}
 }
 
-// do sends a provider request with retries for connection errors and 5xx.
-// Retries only happen before any response bytes reach the client.
-func (p *Proxy) do(ctx context.Context, build func() (*http.Request, error)) (*http.Response, error) {
-	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(300<<attempt) * time.Millisecond):
-			}
-		}
-		req, err := build()
-		if err != nil {
-			return nil, err
-		}
-		resp, err := p.client.Do(req.WithContext(ctx))
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode >= 500 && resp.StatusCode != 501 && attempt < maxRetries {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-			resp.Body.Close()
-			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-			continue
-		}
-		return resp, nil
-	}
-	return nil, lastErr
-}
-
 func setProviderHeaders(h http.Header, prov config.Provider) {
 	for k, v := range prov.Headers {
 		h.Set(k, v)
@@ -302,7 +253,7 @@ func (p *Proxy) toAnthropic(w http.ResponseWriter, r *http.Request, prov config.
 		version = "2023-06-01"
 	}
 	start := time.Now()
-	resp, err := p.do(r.Context(), func() (*http.Request, error) {
+	resp, err := p.client.Do(r.Context(), func() (*http.Request, error) {
 		out, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
@@ -373,7 +324,7 @@ func (p *Proxy) toOpenAI(w http.ResponseWriter, r *http.Request, prov config.Pro
 	}
 	target := strings.TrimRight(prov.BaseURL, "/") + "/chat/completions"
 	start := time.Now()
-	resp, err := p.do(r.Context(), func() (*http.Request, error) {
+	resp, err := p.client.Do(r.Context(), func() (*http.Request, error) {
 		out, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
@@ -444,11 +395,7 @@ func (p *Proxy) toOpenAI(w http.ResponseWriter, r *http.Request, prov config.Pro
 // 401/403 are mapped to 400: passing them on would make Claude Code think
 // the user's own Anthropic login expired.
 func (p *Proxy) providerError(w http.ResponseWriter, e stats.Entry, prov config.Provider, resp *http.Response, countOnly bool) {
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-	detail := redact(strings.TrimSpace(string(data)))
-	if len(detail) > 1500 {
-		detail = detail[:1500] + "…"
-	}
+	ue := provider.ReadError(prov.ID, resp)
 	code := resp.StatusCode
 	switch {
 	case code == http.StatusTooManyRequests:
@@ -457,7 +404,7 @@ func (p *Proxy) providerError(w http.ResponseWriter, e stats.Entry, prov config.
 	default:
 		code = http.StatusBadRequest
 	}
-	msg := fmt.Sprintf("claude-hybrid: provider %q returned HTTP %d: %s", prov.ID, resp.StatusCode, detail)
+	msg := "claude-hybrid: " + ue.Error()
 	log.Printf("provider error: %s", msg)
 	p.fail(w, e, code, msg, countOnly)
 }
@@ -466,10 +413,6 @@ func setUsage(e *stats.Entry, u anthropic.Usage) {
 	e.InputTokens, e.OutputTokens = u.Input, u.Output
 	e.CacheReadTokens, e.CacheWriteTokens = u.CacheRead, u.CacheWrite
 }
-
-var redactRE = regexp.MustCompile(`(?i)(bearer\s+|sk-|key-)[A-Za-z0-9._\-]{8,}`)
-
-func redact(s string) string { return redactRE.ReplaceAllString(s, "${1}[REDACTED]") }
 
 // copyFlush copies src to dst, flushing after every read so SSE stays live.
 func copyFlush(dst io.Writer, src io.Reader) (int64, error) {
