@@ -95,6 +95,7 @@ func (p *Panel) Handler() http.Handler {
 	route("GET /api/meta", func(*http.Request) (any, error) { return meta, nil })
 	route("GET /api/agents", p.listAgents)
 	route("PUT /api/agents/{name}", p.putAgent)
+	route("PUT /api/agents/{name}/route", p.putAgentRoute)
 	route("DELETE /api/agents/{name}", p.deleteAgent)
 	route("GET /api/rules", func(*http.Request) (any, error) { return nonNil(p.Store.Current().Rules), nil })
 	route("PUT /api/rules", p.putRules)

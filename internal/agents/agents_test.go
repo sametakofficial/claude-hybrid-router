@@ -53,3 +53,44 @@ func TestSaveRenameAndTrash(t *testing.T) {
 		t.Fatal("trash should remove from list")
 	}
 }
+
+func TestFileNameIsTheIdentity(t *testing.T) {
+	tmp := t.TempDir()
+	d := Dir{Path: filepath.Join(tmp, "agents"), TrashDir: filepath.Join(tmp, "trash")}
+	os.MkdirAll(d.Path, 0o755)
+	os.WriteFile(filepath.Join(d.Path, "file-name.md"), []byte("---\nname: front-name\ndescription: d\n---\nbody\n"), 0o644)
+	list, _ := d.List()
+	if len(list) != 1 || list[0].Name != "file-name" || !list[0].NameMismatch || list[0].FrontName != "front-name" {
+		t.Fatalf("list %+v", list)
+	}
+	// Before: Name was "front-name", so Get/Trash looked for front-name.md.
+	a, err := d.Get(list[0].Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := d.Save("file-name", a)
+	if err != nil || saved.NameMismatch {
+		t.Fatalf("%+v %v", saved, err)
+	}
+	data, _ := os.ReadFile(filepath.Join(d.Path, "file-name.md"))
+	if !strings.Contains(string(data), "name: file-name") || !strings.Contains(string(data), "claude-hybrid:agent=file-name") {
+		t.Fatalf("saving aligns the frontmatter:\n%s", data)
+	}
+	if _, err := d.Save("", Agent{Name: "../x", Description: "d"}); err == nil {
+		t.Fatal("invalid name must be refused")
+	}
+}
+
+func TestTrashTwiceInOneSecond(t *testing.T) {
+	tmp := t.TempDir()
+	d := Dir{Path: filepath.Join(tmp, "agents"), TrashDir: filepath.Join(tmp, "trash")}
+	for i := 0; i < 2; i++ {
+		d.Save("", Agent{Name: "a", Description: "d", Prompt: "p"})
+		if _, err := d.Trash("a"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := os.ReadDir(d.TrashDir); len(got) != 2 {
+		t.Fatalf("second trash overwrote the first: %d files", len(got))
+	}
+}

@@ -245,3 +245,51 @@ func TestProviderTestButton(t *testing.T) {
 		t.Fatalf("%d %s", code, out)
 	}
 }
+
+func TestMissingAgentsAndRouteEndpoint(t *testing.T) {
+	p, h, dir := setup(t)
+	// Route only, no file.
+	code, out := do(h, "PUT", "/api/agents/ghost/route", `{"provider":"gpt","model":"gpt-5","system_mode":"keep"}`, nil)
+	if code != 200 || !strings.Contains(out, `"name":"ghost"`) || !strings.Contains(out, `"model":"gpt-5"`) {
+		t.Fatalf("%d %s", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ghost.md")); !os.IsNotExist(err) {
+		t.Fatal("route endpoint must not write the agent file")
+	}
+	if code, _ := do(h, "PUT", "/api/agents/ghost/route", `{"provider":"nope"}`, nil); code != 400 {
+		t.Fatalf("unknown provider: %d", code)
+	}
+	_, out = do(h, "GET", "/api/agents", "", nil)
+	var list []map[string]any
+	json.Unmarshal([]byte(out), &list)
+	if len(list) != 1 || list[0]["name"] != "ghost" || list[0]["missing"] != true || list[0]["file"] != "" || list[0]["route"].(map[string]any)["provider"] != "gpt" {
+		t.Fatalf("missing agent not listed: %s", out)
+	}
+	// Recreate the file; the body's route wins.
+	code, out = do(h, "PUT", "/api/agents/ghost", `{"name":"ghost","description":"back","prompt":"p","route":{"provider":"gpt","model":"gpt-6"}}`, nil)
+	if code != 200 || !strings.Contains(out, `"missing":false`) {
+		t.Fatalf("%d %s", code, out)
+	}
+	if p.Store.Current().Agents["ghost"].Model != "gpt-6" {
+		t.Fatal("route from body not saved")
+	}
+	// Changing only the route keeps an edit made to the file meanwhile.
+	f := filepath.Join(dir, "ghost.md")
+	data, _ := os.ReadFile(f)
+	os.WriteFile(f, []byte(strings.Replace(string(data), "p\n", "edited by hand\n", 1)), 0o644)
+	do(h, "PUT", "/api/agents/ghost/route", `{"provider":""}`, nil)
+	if data, _ := os.ReadFile(f); !strings.Contains(string(data), "edited by hand") {
+		t.Fatal("route change rewrote the file")
+	}
+	if _, ok := p.Store.Current().Agents["ghost"]; ok {
+		t.Fatal("anthropic route should remove the entry")
+	}
+	// Deleting a route-only agent removes the route.
+	do(h, "PUT", "/api/agents/orphan/route", `{"provider":"gpt"}`, nil)
+	if code, out := do(h, "DELETE", "/api/agents/orphan", "", nil); code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	if _, ok := p.Store.Current().Agents["orphan"]; ok {
+		t.Fatal("orphan route not removed")
+	}
+}
