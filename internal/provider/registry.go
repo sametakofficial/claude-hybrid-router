@@ -24,6 +24,7 @@ var Registry = []Spec{
 	{
 		Name: config.TypeAnthropic, Label: "Anthropic-compatible",
 		Help: "Anthropic Messages API ({base_url}/v1/messages). Requests are forwarded with the route's overrides, no translation.",
+		New:  newAnthropic,
 	},
 }
 

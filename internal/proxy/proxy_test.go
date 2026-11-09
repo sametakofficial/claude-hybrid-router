@@ -307,3 +307,40 @@ func TestLegacyMarkerOnlyForLocalURLs(t *testing.T) {
 		t.Fatalf("remote legacy URL must be ignored (upstream=%d)", e.upstream.hits)
 	}
 }
+
+func TestCutPassthroughStreamIsStillLogged(t *testing.T) {
+	e := newEnv(t)
+	cut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n")
+		w.(http.Flusher).Flush()
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		conn.Close() // the upstream dies mid-stream
+	}))
+	defer cut.Close()
+	e.cfg.Server.Upstream = cut.URL
+	req, _ := http.NewRequest(http.MethodPost, e.proxy.URL+"/v1/messages", strings.NewReader(`{"model":"claude-opus","stream":true,"messages":[]}`))
+	if resp, err := http.DefaultClient.Do(req); err == nil {
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}
+	// Before: ReverseProxy's http.ErrAbortHandler panic skipped the entry.
+	got := e.entries(1)
+	if len(got) != 1 || got[0].Error == "" || got[0].InputTokens != 9 {
+		t.Fatalf("entries %+v", got)
+	}
+}
+
+func TestContextOverflowUsesAnthropicWording(t *testing.T) {
+	e := newEnv(t)
+	over := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		io.WriteString(w, `{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 200000 tokens.","code":"context_length_exceeded"}}`)
+	}))
+	defer over.Close()
+	e.cfg.Providers[1].BaseURL = over.URL
+	resp, out := e.post("/v1/messages", `{"model":"claude-haiku-4","max_tokens":50,"messages":[{"role":"user","content":"x"}]}`)
+	if resp.StatusCode != 400 || !strings.Contains(out, "prompt is too long") || !strings.Contains(out, "invalid_request_error") {
+		t.Fatalf("%d %s", resp.StatusCode, out)
+	}
+}

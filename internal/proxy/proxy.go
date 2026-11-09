@@ -4,9 +4,7 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +13,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +21,6 @@ import (
 	"github.com/sametakofficial/claude-hybrid-router/internal/provider"
 	"github.com/sametakofficial/claude-hybrid-router/internal/router"
 	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
-	"github.com/sametakofficial/claude-hybrid-router/internal/translate"
 )
 
 const (
@@ -149,7 +145,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		entry.Provider = "legacy"
 		entry.Model = entry.ReqModel
 		prov := config.Provider{ID: "legacy", Type: config.TypeAnthropic, BaseURL: d.LegacyURL}
-		p.toAnthropic(w, r, prov, d.Route, req, entry, countOnly)
+		p.routed(w, r, prov, d.Route, req, entry, countOnly)
 	default:
 		prov, ok := cfg.Provider(d.Route.Provider)
 		entry.Provider = d.Route.Provider
@@ -163,50 +159,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		router.Apply(req, d.Route)
-		if prov.Type == config.TypeAnthropic {
-			p.toAnthropic(w, r, prov, d.Route, req, entry, countOnly)
-		} else {
+		if prov.Type == config.TypeOpenAI {
 			p.toOpenAI(w, r, prov, d.Route, req, entry, countOnly)
+		} else {
+			p.routed(w, r, prov, d.Route, req, entry, countOnly)
 		}
 	}
-}
-
-// passthrough sends the request to Anthropic with the client's own headers
-// (the subscription's OAuth token stays between Claude Code and Anthropic).
-func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, body []byte, e stats.Entry, countOnly bool) {
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	r.ContentLength = int64(len(body))
-	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	if countOnly {
-		p.up.ServeHTTP(w, r)
-		return
-	}
-	sw := anthropic.NewUsageWriter(w)
-	start := time.Now()
-	p.up.ServeHTTP(sw, r)
-	e.Status, e.LatencyMS = sw.Status(), time.Since(start).Milliseconds()
-	setUsage(&e, sw.Usage())
-	if e.Status >= 400 {
-		e.Error = sw.ErrText()
-		if e.Status == http.StatusTooManyRequests {
-			e.Error = rateLimitInfo(sw.Header(), e.Error)
-		}
-	}
-	p.rec.Add(e)
-}
-
-// rateLimitInfo explains an Anthropic 429 using its response headers.
-func rateLimitInfo(h http.Header, msg string) string {
-	parts := []string{"Anthropic rate limit (Claude Code retries automatically)"}
-	if msg != "" && msg != "Error" {
-		parts = append(parts, msg)
-	}
-	for _, k := range []string{"retry-after", "anthropic-ratelimit-unified-status", "anthropic-ratelimit-unified-reset", "anthropic-ratelimit-unified-representative-claim"} {
-		if v := h.Get(k); v != "" {
-			parts = append(parts, k+"="+v)
-		}
-	}
-	return strings.Join(parts, "; ")
 }
 
 func (p *Proxy) fail(w http.ResponseWriter, e stats.Entry, code int, msg string, countOnly bool) {
@@ -217,250 +175,7 @@ func (p *Proxy) fail(w http.ResponseWriter, e stats.Entry, code int, msg string,
 	}
 }
 
-func setProviderHeaders(h http.Header, prov config.Provider) {
-	for k, v := range prov.Headers {
-		h.Set(k, v)
-	}
-}
-
-// toAnthropic forwards to an Anthropic-compatible provider. Client headers are
-// NOT copied, so the subscription token never leaves for a third party.
-func (p *Proxy) toAnthropic(w http.ResponseWriter, r *http.Request, prov config.Provider, rt config.Route, req anthropic.Request, e stats.Entry, countOnly bool) {
-	if rt.Model != "" {
-		req["model"] = rt.Model
-	}
-	if rt.MaxTokens > 0 {
-		if n, err := strconv.Atoi(fmt.Sprint(req["max_tokens"])); err != nil || n > rt.MaxTokens {
-			req["max_tokens"] = rt.MaxTokens
-		}
-	}
-	if rt.Temperature != nil {
-		req["temperature"] = *rt.Temperature
-	}
-	body, err := json.Marshal(req)
-	if err != nil {
-		p.fail(w, e, http.StatusBadRequest, "claude-hybrid: encode request: "+err.Error(), countOnly)
-		return
-	}
-	base := strings.TrimRight(prov.BaseURL, "/")
-	base = strings.TrimSuffix(base, "/v1")
-	target := base + r.URL.Path
-	if r.URL.RawQuery != "" {
-		target += "?" + r.URL.RawQuery
-	}
-	version := r.Header.Get("anthropic-version")
-	if version == "" {
-		version = "2023-06-01"
-	}
-	start := time.Now()
-	resp, err := p.client.Do(r.Context(), func() (*http.Request, error) {
-		out, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		out.Header.Set("Content-Type", "application/json")
-		out.Header.Set("anthropic-version", version)
-		if key := prov.Key(); key != "" {
-			out.Header.Set("x-api-key", key)
-			out.Header.Set("Authorization", "Bearer "+key)
-		}
-		setProviderHeaders(out.Header, prov)
-		return out, nil
-	})
-	if err != nil {
-		if countOnly {
-			anthropic.WriteCount(w, anthropic.EstimateTokens(body))
-			return
-		}
-		p.fail(w, e, http.StatusBadGateway, fmt.Sprintf("claude-hybrid: provider %q unreachable: %v", prov.ID, err), countOnly)
-		return
-	}
-	defer resp.Body.Close()
-	if countOnly && resp.StatusCode != http.StatusOK {
-		anthropic.WriteCount(w, anthropic.EstimateTokens(body)) // many compatible APIs lack count_tokens
-		return
-	}
-	if resp.StatusCode != http.StatusOK {
-		p.providerError(w, e, prov, resp, countOnly)
-		return
-	}
-	sw := anthropic.NewUsageWriter(w)
-	for _, k := range []string{"Content-Type", "Cache-Control"} {
-		if v := resp.Header.Get(k); v != "" {
-			sw.Header().Set(k, v)
-		}
-	}
-	sw.WriteHeader(http.StatusOK)
-	_, copyErr := copyFlush(sw, resp.Body)
-	if countOnly {
-		return
-	}
-	e.Status, e.LatencyMS = sw.Status(), time.Since(start).Milliseconds()
-	setUsage(&e, sw.Usage())
-	if copyErr != nil && r.Context().Err() == nil {
-		e.Error = "stream interrupted: " + copyErr.Error()
-	}
-	p.rec.Add(e)
-}
-
-// toOpenAI translates to Chat Completions and back.
-func (p *Proxy) toOpenAI(w http.ResponseWriter, r *http.Request, prov config.Provider, rt config.Route, req anthropic.Request, e stats.Entry, countOnly bool) {
-	raw, err := json.Marshal(req)
-	if err != nil {
-		p.fail(w, e, http.StatusBadRequest, "claude-hybrid: encode request: "+err.Error(), countOnly)
-		return
-	}
-	if countOnly {
-		anthropic.WriteCount(w, anthropic.EstimateTokens(raw))
-		return
-	}
-	body, err := translate.ToOpenAI(raw, translate.Options{
-		Model: rt.Model, MaxTokensCap: rt.MaxTokens, MaxTokensField: prov.MaxTokensField,
-		Temperature: rt.Temperature, ReasoningEffort: rt.ReasoningEffort,
-	})
-	if err != nil {
-		p.fail(w, e, http.StatusBadRequest, "claude-hybrid: translate request: "+err.Error(), false)
-		return
-	}
-	target := strings.TrimRight(prov.BaseURL, "/") + "/chat/completions"
-	start := time.Now()
-	resp, err := p.client.Do(r.Context(), func() (*http.Request, error) {
-		out, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		out.Header.Set("Content-Type", "application/json")
-		if key := prov.Key(); key != "" {
-			out.Header.Set("Authorization", "Bearer "+key)
-		}
-		setProviderHeaders(out.Header, prov)
-		return out, nil
-	})
-	if err != nil {
-		p.fail(w, e, http.StatusBadGateway, fmt.Sprintf("claude-hybrid: provider %q unreachable: %v", prov.ID, err), false)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		p.providerError(w, e, prov, resp, false)
-		return
-	}
-	// The model name shown to Claude Code: keep what it asked for so its
-	// own bookkeeping (context window, pricing labels) stays sane.
-	shownModel := e.ReqModel
-	isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
-	if e.Stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.WriteHeader(http.StatusOK)
-		flusher, _ := w.(http.Flusher)
-		flush := func() {
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-		src := io.Reader(resp.Body)
-		if !isSSE { // provider ignored stream=true: wrap the JSON as one chunk
-			src = jsonAsSSE(resp.Body)
-		}
-		usage, err := translate.NewStream(w, flush, shownModel).Run(src)
-		e.Status, e.LatencyMS = 200, time.Since(start).Milliseconds()
-		e.InputTokens, e.OutputTokens = usage.InputTokens+usage.CacheRead, usage.OutputTokens
-		e.CacheReadTokens = usage.CacheRead
-		if err != nil && r.Context().Err() == nil {
-			e.Error = err.Error()
-		}
-		p.rec.Add(e)
-		return
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-	if err != nil {
-		p.fail(w, e, http.StatusBadGateway, "claude-hybrid: read provider response: "+err.Error(), false)
-		return
-	}
-	out, usage, err := translate.FromOpenAI(data, shownModel)
-	if err != nil {
-		p.fail(w, e, http.StatusBadGateway, fmt.Sprintf("claude-hybrid: provider %q: %v", prov.ID, err), false)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(out)
-	e.Status, e.LatencyMS = 200, time.Since(start).Milliseconds()
-	e.InputTokens, e.OutputTokens = usage.InputTokens+usage.CacheRead, usage.OutputTokens
-	e.CacheReadTokens = usage.CacheRead
-	p.rec.Add(e)
-}
-
-// providerError turns a provider failure into an Anthropic-style error.
-// 401/403 are mapped to 400: passing them on would make Claude Code think
-// the user's own Anthropic login expired.
-func (p *Proxy) providerError(w http.ResponseWriter, e stats.Entry, prov config.Provider, resp *http.Response, countOnly bool) {
-	ue := provider.ReadError(prov.ID, resp)
-	code := resp.StatusCode
-	switch {
-	case code == http.StatusTooManyRequests:
-	case code >= 500:
-		code = http.StatusBadGateway
-	default:
-		code = http.StatusBadRequest
-	}
-	msg := "claude-hybrid: " + ue.Error()
-	log.Printf("provider error: %s", msg)
-	p.fail(w, e, code, msg, countOnly)
-}
-
 func setUsage(e *stats.Entry, u anthropic.Usage) {
 	e.InputTokens, e.OutputTokens = u.Input, u.Output
 	e.CacheReadTokens, e.CacheWriteTokens = u.CacheRead, u.CacheWrite
-}
-
-// copyFlush copies src to dst, flushing after every read so SSE stays live.
-func copyFlush(dst io.Writer, src io.Reader) (int64, error) {
-	f, _ := dst.(http.Flusher)
-	buf := make([]byte, 32<<10)
-	var n int64
-	for {
-		k, err := src.Read(buf)
-		if k > 0 {
-			if _, werr := dst.Write(buf[:k]); werr != nil {
-				return n, werr
-			}
-			n += int64(k)
-			if f != nil {
-				f.Flush()
-			}
-		}
-		if err == io.EOF {
-			return n, nil
-		}
-		if err != nil {
-			return n, err
-		}
-	}
-}
-
-// jsonAsSSE wraps a non-streaming Chat Completions JSON reply as a stream of
-// one chunk, for providers that ignore stream=true.
-func jsonAsSSE(r io.Reader) io.Reader {
-	data, _ := io.ReadAll(io.LimitReader(r, maxBody))
-	var full struct {
-		ID      string `json:"id"`
-		Choices []struct {
-			Message      json.RawMessage `json:"message"`
-			FinishReason *string         `json:"finish_reason"`
-		} `json:"choices"`
-		Usage json.RawMessage `json:"usage"`
-	}
-	if json.Unmarshal(data, &full) != nil || len(full.Choices) == 0 {
-		return bytes.NewReader(append(append([]byte("data: "), data...), "\n\ndata: [DONE]\n\n"...))
-	}
-	chunk := map[string]any{
-		"id":      full.ID,
-		"choices": []any{map[string]any{"delta": full.Choices[0].Message, "finish_reason": full.Choices[0].FinishReason}},
-	}
-	if len(full.Usage) > 0 {
-		chunk["usage"] = full.Usage
-	}
-	b, _ := json.Marshal(chunk)
-	return strings.NewReader("data: " + string(b) + "\n\ndata: [DONE]\n\n")
 }
