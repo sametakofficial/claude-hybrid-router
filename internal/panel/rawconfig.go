@@ -31,7 +31,7 @@ func (p *Panel) putRaw(r *http.Request) (any, error) {
 	}
 	next, err := config.Parse([]byte(in.YAML))
 	if err != nil {
-		return nil, bad("%v", err)
+		return nil, err
 	}
 	_, err = p.Store.Update(func(c *config.Config) error {
 		// Masked values mean "unchanged". A provider that is new (or was
@@ -49,12 +49,15 @@ func (p *Panel) putRaw(r *http.Request) (any, error) {
 			next.Providers[i] = pr
 		}
 		next.Server.PanelToken = unmaskToken(next.Server.PanelToken, c.Server.PanelToken)
+		if err := checkToken(next.Server.PanelToken, c.Server.PanelToken); err != nil {
+			return err
+		}
 		lockFileOnly(&next.Server, c.Server)
 		*c = *next
 		return nil
 	})
 	if err != nil {
-		return nil, bad("%v", err)
+		return nil, err
 	}
 	return map[string]bool{"ok": true}, nil
 }

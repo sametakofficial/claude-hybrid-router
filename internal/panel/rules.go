@@ -21,7 +21,7 @@ func (p *Panel) putRules(r *http.Request) (any, error) {
 	}
 	cfg, err := p.Store.Update(func(c *config.Config) error { c.Rules = in; return nil })
 	if err != nil {
-		return nil, bad("%v", err)
+		return nil, err
 	}
 	return nonNil(cfg.Rules), nil
 }

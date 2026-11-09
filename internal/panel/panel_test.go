@@ -195,3 +195,23 @@ func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+func TestSettingsValidation(t *testing.T) {
+	p, h, _ := setup(t)
+	s := `{"proxy_listen":"127.0.0.1:3457","panel_listen":"127.0.0.1:3458","header_timeout":300`
+	if code, out := do(h, "PUT", "/api/settings", s+`,"proxy_listen":"nope"}`, nil); code != 400 {
+		t.Fatalf("bad listen address must be 400: %d %s", code, out)
+	}
+	if code, out := do(h, "PUT", "/api/settings", s+`,"panel_token":"short"}`, nil); code != 400 || !strings.Contains(out, "16") {
+		t.Fatalf("short token must be refused: %d %s", code, out)
+	}
+	if code, out := do(h, "PUT", "/api/settings", s+`,"panel_token":"a-long-enough-token"}`, nil); code != 200 {
+		t.Fatalf("%d %s", code, out)
+	}
+	if p.Store.Current().Server.PanelToken != "a-long-enough-token" {
+		t.Fatal("token not saved")
+	}
+	if code, _ := do(h, "PUT", "/api/config/raw", `{"yaml":"version: 2\nserver: [oops"}`, map[string]string{"X-CHR-Token": "a-long-enough-token"}); code != 400 {
+		t.Fatalf("YAML syntax error must be 400, got %d", code)
+	}
+}

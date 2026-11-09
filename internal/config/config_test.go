@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -60,5 +61,34 @@ func TestExampleConfigParses(t *testing.T) {
 	}
 	if strings.HasPrefix(c.Server.AgentsDir, "~") || len(c.Agents) != 2 || len(c.Rules) != 1 {
 		t.Fatalf("parsed %+v", c.Server)
+	}
+}
+
+func TestValidateRejectsBadAddressesAndURLs(t *testing.T) {
+	for name, mut := range map[string]func(*Config){
+		"proxy listen": func(c *Config) { c.Server.ProxyListen = "3457" },
+		"panel port":   func(c *Config) { c.Server.PanelListen = "127.0.0.1:99999" },
+		"upstream":     func(c *Config) { c.Server.Upstream = "api.anthropic.com" },
+		"base url":     func(c *Config) { c.Providers = []Provider{{ID: "x", Type: TypeOpenAI, BaseURL: "https://"}} },
+		"type":         func(c *Config) { c.Providers = []Provider{{ID: "x", Type: "gemini", BaseURL: "https://x"}} },
+		"empty rule":   func(c *Config) { c.Rules = []Rule{{Match: " "}} },
+	} {
+		c := Default()
+		mut(c)
+		err := c.Validate()
+		var ve *ValidationError
+		if !errors.As(err, &ve) {
+			t.Errorf("%s: want ValidationError, got %v", name, err)
+		}
+	}
+}
+
+func TestLoadDropsEmptyRules(t *testing.T) {
+	c, err := Parse([]byte("version: 2\nrules:\n  - match: \"\"\n    enabled: true\n  - match: claude-*\n    enabled: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Rules) != 1 || c.Rules[0].Match != "claude-*" {
+		t.Fatalf("rules: %+v", c.Rules)
 	}
 }

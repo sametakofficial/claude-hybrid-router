@@ -159,8 +159,12 @@ func (p *Panel) api(h handlerFunc) http.Handler {
 		if err != nil {
 			code := http.StatusInternalServerError
 			var ae apiError
-			if errors.As(err, &ae) {
+			var ve *config.ValidationError
+			switch {
+			case errors.As(err, &ae):
 				code = ae.code
+			case errors.As(err, &ve):
+				code = http.StatusBadRequest
 			}
 			writeJSON(w, code, map[string]string{"error": err.Error()})
 			return

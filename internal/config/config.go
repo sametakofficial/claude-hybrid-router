@@ -5,10 +5,14 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -20,6 +24,10 @@ const (
 	TypeOpenAI    = "openai"    // OpenAI-compatible /chat/completions (translated)
 	TypeAnthropic = "anthropic" // Anthropic-compatible /v1/messages (passed through)
 )
+
+// ProviderTypes lists every valid provider type. internal/provider has the
+// matching adapters; a test there keeps the two lists in sync.
+var ProviderTypes = []string{TypeOpenAI, TypeAnthropic}
 
 // System prompt modes for a route.
 const (
@@ -174,6 +182,7 @@ func (c *Config) applyDefaults() {
 	if c.Agents == nil {
 		c.Agents = map[string]Route{}
 	}
+	c.normalize()
 	for i := range c.Providers {
 		p := &c.Providers[i]
 		if p.Type == "" {
@@ -185,56 +194,116 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// Validate checks the config for mistakes that would break routing.
+// ValidationError is a mistake in the config itself (as opposed to an I/O
+// failure while loading or saving it).
+type ValidationError struct{ Msg string }
+
+func (e *ValidationError) Error() string { return e.Msg }
+
+func invalid(format string, a ...any) error { return &ValidationError{fmt.Sprintf(format, a...)} }
+
+func checkListen(name, addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return invalid("%s %q: use host:port", name, addr)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return invalid("%s %q: port must be 1-65535", name, addr)
+	}
+	return nil
+}
+
+func checkURL(name, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return invalid("%s must be an http:// or https:// URL, got %q", name, raw)
+	}
+	return nil
+}
+
+// normalize fixes harmless leftovers instead of refusing to load: rules
+// without a pattern never match, so they are dropped.
+func (c *Config) normalize() {
+	rules := c.Rules[:0]
+	for _, r := range c.Rules {
+		r.Match = strings.TrimSpace(r.Match)
+		if r.Match != "" {
+			rules = append(rules, r)
+		}
+	}
+	c.Rules = rules
+	if len(c.Rules) == 0 {
+		c.Rules = nil
+	}
+}
+
+// Validate checks the config for mistakes that would break routing. Errors
+// are *ValidationError.
 func (c *Config) Validate() error {
-	switch c.Server.Plan {
+	s := c.Server
+	if err := checkListen("server.proxy_listen", s.ProxyListen); err != nil {
+		return err
+	}
+	if err := checkListen("server.panel_listen", s.PanelListen); err != nil {
+		return err
+	}
+	if err := checkURL("server.upstream", s.Upstream); err != nil {
+		return err
+	}
+	switch s.Plan {
 	case "", "pro", "max5", "max20", "custom":
 	default:
-		return fmt.Errorf("server.plan must be pro, max5, max20 or custom")
+		return invalid("server.plan must be pro, max5, max20 or custom")
 	}
 	seen := map[string]bool{}
 	for _, p := range c.Providers {
 		if !idRE.MatchString(p.ID) {
-			return fmt.Errorf("provider id %q: use lowercase letters, digits, - or _", p.ID)
+			return invalid("provider id %q: use lowercase letters, digits, - or _", p.ID)
 		}
 		if seen[p.ID] {
-			return fmt.Errorf("duplicate provider id %q", p.ID)
+			return invalid("duplicate provider id %q", p.ID)
 		}
 		seen[p.ID] = true
-		if p.Type != TypeOpenAI && p.Type != TypeAnthropic {
-			return fmt.Errorf("provider %q: type must be %q or %q", p.ID, TypeOpenAI, TypeAnthropic)
+		if !slices.Contains(ProviderTypes, p.Type) {
+			return invalid("provider %q: type must be one of %s", p.ID, strings.Join(ProviderTypes, ", "))
 		}
-		if !strings.HasPrefix(p.BaseURL, "http://") && !strings.HasPrefix(p.BaseURL, "https://") {
-			return fmt.Errorf("provider %q: base_url must start with http:// or https://", p.ID)
+		if err := checkURL(fmt.Sprintf("provider %q: base_url", p.ID), p.BaseURL); err != nil {
+			return err
 		}
 	}
 	check := func(where string, r Route) error {
 		if r.Provider != "" && !seen[r.Provider] {
-			return fmt.Errorf("%s: unknown provider %q", where, r.Provider)
+			return invalid("%s: unknown provider %q", where, r.Provider)
 		}
 		switch r.SystemMode {
 		case "", SystemKeep, SystemReplace, SystemAppend:
 		default:
-			return fmt.Errorf("%s: system_mode must be keep, replace or append", where)
+			return invalid("%s: system_mode must be keep, replace or append", where)
 		}
 		switch r.ReasoningEffort {
 		case "", "minimal", "low", "medium", "high":
 		default:
-			return fmt.Errorf("%s: reasoning_effort must be minimal, low, medium or high", where)
+			return invalid("%s: reasoning_effort must be minimal, low, medium or high", where)
+		}
+		if r.MaxTokens < 0 {
+			return invalid("%s: max_tokens must not be negative", where)
 		}
 		return nil
 	}
 	for name, r := range c.Agents {
 		if !ValidAgentName(name) {
-			return fmt.Errorf("agent name %q is not valid", name)
+			return invalid("agent name %q is not valid", name)
 		}
 		if err := check("agent "+name, r); err != nil {
 			return err
 		}
 	}
 	for i, r := range c.Rules {
+		if strings.TrimSpace(r.Match) == "" {
+			return invalid("rule %d: match pattern is empty", i+1)
+		}
 		if _, err := path.Match(r.Match, ""); err != nil {
-			return fmt.Errorf("rule %d: bad pattern %q", i+1, r.Match)
+			return invalid("rule %d: bad pattern %q", i+1, r.Match)
 		}
 		if err := check(fmt.Sprintf("rule %d", i+1), r.Route); err != nil {
 			return err
@@ -266,10 +335,10 @@ func (c *Config) Clone() *Config {
 func Parse(data []byte) (*Config, error) {
 	var c Config
 	if err := yaml.Unmarshal(data, &c); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+		return nil, invalid("parse config: %v", err)
 	}
 	if c.Version != 0 && c.Version != 2 {
-		return nil, fmt.Errorf("config version %d is not supported (expected 2)", c.Version)
+		return nil, invalid("config version %d is not supported (expected 2)", c.Version)
 	}
 	c.applyDefaults()
 	if err := c.Validate(); err != nil {

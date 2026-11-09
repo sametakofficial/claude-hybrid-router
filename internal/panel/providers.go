@@ -77,7 +77,7 @@ func (p *Panel) putProvider(r *http.Request) (any, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, bad("%v", err)
+		return nil, err
 	}
 	saved, _ := cfg.Provider(id)
 	return viewProvider(saved), nil
@@ -169,7 +169,7 @@ func (p *Panel) discoverModels(r *http.Request) (any, error) {
 	}
 	models, err := p.discover(r.Context(), in)
 	if err != nil {
-		return nil, bad("%v", err)
+		return nil, err
 	}
 	return map[string]any{"models": models}, nil
 }
@@ -183,7 +183,7 @@ func (p *Panel) refreshModels(r *http.Request) (any, error) {
 	}
 	models, err := p.discover(r.Context(), pr)
 	if err != nil {
-		return nil, bad("%v", err)
+		return nil, err
 	}
 	cfg, err := p.Store.Update(func(c *config.Config) error {
 		for i := range c.Providers {
