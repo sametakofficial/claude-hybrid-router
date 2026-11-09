@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,9 +29,24 @@ func setup(t *testing.T) (*Panel, http.Handler, string) {
 		return nil
 	})
 	rec := stats.New(10, nil)
-	p := &Panel{Store: st, Rec: rec, Proxy: proxy.New(st.Current, rec), Started: time.Now()}
+	p := &Panel{Store: st, Rec: rec, Proxy: proxy.New(st.Current, rec), Started: time.Now(), Client: offlineClient(t)}
 	return p, p.Handler(), agentsDir
 }
+
+// offlineClient lets requests reach httptest servers on loopback only; any
+// other host fails at once, so tests never touch the network.
+func offlineClient(t *testing.T) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if h := r.URL.Hostname(); h != "127.0.0.1" && h != "localhost" {
+			return nil, fmt.Errorf("offline test: %s not allowed", r.URL.Host)
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func do(h http.Handler, method, path, body string, hdr map[string]string) (int, string) {
 	r := httptest.NewRequest(method, path, strings.NewReader(body))

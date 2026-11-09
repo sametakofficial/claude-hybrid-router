@@ -133,6 +133,12 @@ func (r *Recorder) Summary() Summary {
 	for _, t := range r.targets {
 		s.Targets = append(s.Targets, *t)
 	}
-	sort.Slice(s.Targets, func(i, j int) bool { return s.Targets[i].Requests > s.Targets[j].Requests })
+	sort.Slice(s.Targets, func(i, j int) bool {
+		a, b := s.Targets[i], s.Targets[j]
+		if a.Requests != b.Requests {
+			return a.Requests > b.Requests
+		}
+		return a.Target < b.Target
+	})
 	return s
 }

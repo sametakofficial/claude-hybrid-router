@@ -126,18 +126,18 @@ func TestBuildOpencodeCommand(t *testing.T) {
 		wantOmits []string
 	}{
 		{
-			name: "fresh session + agent",
+			name:  "fresh session + agent",
 			agent: "simplifier", prompt: "hello",
 			wantHas:   []string{"OPENCODE_NO_DEBUG=1", "opencode run --format json", "--agent simplifier", "'hello'"},
 			wantOmits: []string{"--session"},
 		},
 		{
-			name: "resumed session",
+			name:  "resumed session",
 			agent: "simplifier", prompt: "hello", sessionID: "ses_abc",
 			wantHas: []string{"--session ses_abc", "--agent simplifier"},
 		},
 		{
-			name: "quote escape",
+			name:  "quote escape",
 			agent: "general", prompt: "what's up",
 			wantHas: []string{`'what'"'"'s up'`},
 		},

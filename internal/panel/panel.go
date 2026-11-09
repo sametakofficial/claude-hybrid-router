@@ -35,6 +35,21 @@ type Panel struct {
 	Usage   *usage.Store // optional
 	Version string
 	Started time.Time
+	// Client is used to talk to providers (model discovery). Nil means a
+	// default client that never follows redirects. Tests set a fake.
+	Client *http.Client
+}
+
+var defaultClient = &http.Client{
+	Timeout:       30 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+func (p *Panel) client() *http.Client {
+	if p.Client != nil {
+		return p.Client
+	}
+	return defaultClient
 }
 
 type apiError struct {
@@ -289,7 +304,7 @@ func (p *Panel) putProvider(r *http.Request) (any, error) {
 		if old, ok := p.Store.Get().Provider(id); ok && !create {
 			probe.APIKey = keepKey(in.APIKey, old.APIKey)
 		}
-		if models, err := discover(r.Context(), probe); err == nil {
+		if models, err := p.discover(r.Context(), probe); err == nil {
 			in.Models = models
 		}
 	}
@@ -357,7 +372,7 @@ func (p *Panel) fetchModels(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	models, err := discover(r.Context(), pr)
+	models, err := p.discover(r.Context(), pr)
 	if err != nil {
 		return nil, bad("%v", err)
 	}
@@ -382,7 +397,7 @@ func (p *Panel) discoverModels(r *http.Request) (any, error) {
 	} else if in.APIKey == maskedToken || strings.Contains(in.APIKey, "…") {
 		in.APIKey = ""
 	}
-	models, err := discover(r.Context(), in)
+	models, err := p.discover(r.Context(), in)
 	if err != nil {
 		return nil, bad("%v", err)
 	}
@@ -396,7 +411,7 @@ func (p *Panel) refreshModels(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	models, err := discover(r.Context(), pr)
+	models, err := p.discover(r.Context(), pr)
 	if err != nil {
 		return nil, bad("%v", err)
 	}
@@ -416,7 +431,7 @@ func (p *Panel) refreshModels(r *http.Request) (any, error) {
 }
 
 // discover calls the provider's /models endpoint.
-func discover(ctx context.Context, pr config.Provider) ([]string, error) {
+func (p *Panel) discover(ctx context.Context, pr config.Provider) ([]string, error) {
 	base := strings.TrimRight(pr.BaseURL, "/")
 	if pr.Type == config.TypeAnthropic {
 		base = strings.TrimSuffix(base, "/v1") + "/v1"
@@ -435,7 +450,7 @@ func discover(ctx context.Context, pr config.Provider) ([]string, error) {
 	for k, v := range pr.Headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.client().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch models: %v", err)
 	}
