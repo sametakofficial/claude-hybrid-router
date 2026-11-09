@@ -10,9 +10,8 @@ import (
 )
 
 // sessionCache maps agent-name → opencode sessionID, with TTL-based expiry
-// and optional disk persistence for cross-process reuse (each claude-hybrid
-// invocation spawns its own bridge process; the on-disk JSON lets a fresh
-// process resume the same opencode session until TTL expires).
+// and optional disk persistence so a restarted bridge can resume the same
+// opencode session until the TTL expires.
 type sessionCache struct {
 	mu       sync.Mutex
 	entries  map[string]sessionEntry
@@ -121,13 +120,5 @@ func (c *sessionCache) Set(agent, sessionID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[agent] = sessionEntry{ID: sessionID, LastAt: c.now()}
-	c.saveToDisk()
-}
-
-// Forget removes the cache entry for agent.
-func (c *sessionCache) Forget(agent string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.entries, agent)
 	c.saveToDisk()
 }

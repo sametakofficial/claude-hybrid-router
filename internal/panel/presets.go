@@ -1,9 +1,5 @@
 package panel
 
-import "os/exec"
-
-var lookPath = exec.LookPath
-
 // Preset is a provider template shown when adding a provider.
 type Preset struct {
 	ID             string   `json:"id"`

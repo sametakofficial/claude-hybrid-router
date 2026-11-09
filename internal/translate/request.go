@@ -84,8 +84,8 @@ func parseBlocks(raw json.RawMessage) ([]block, error) {
 	return bs, err
 }
 
-// SystemText flattens an Anthropic system field (string or blocks) to text.
-func SystemText(raw json.RawMessage) string {
+// systemText flattens an Anthropic system field (string or blocks) to text.
+func systemText(raw json.RawMessage) string {
 	bs, err := parseBlocks(raw)
 	if err != nil {
 		return ""
@@ -156,7 +156,7 @@ func ToOpenAI(body []byte, opt Options) ([]byte, error) {
 	}
 
 	msgs := make([]map[string]any, 0, len(req.Messages)+1)
-	if sys := SystemText(req.System); sys != "" {
+	if sys := systemText(req.System); sys != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": sys})
 	}
 

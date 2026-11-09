@@ -22,7 +22,6 @@ type Decision struct {
 	Route     config.Route
 	LegacyURL string // set for v1 markers: forward as-is to this Anthropic-compatible URL
 	Body      []byte // body to send (marker removed)
-	Changed   bool   // Body differs from the original request
 }
 
 // request is the parsed JSON body; numbers stay exact via UseNumber.
@@ -41,7 +40,7 @@ func parseRequest(body []byte) (request, error) {
 func (r request) model() string { s, _ := r["model"].(string); return s }
 func (r request) stream() bool  { b, _ := r["stream"].(bool); return b }
 
-// systemTexts calls fn for every text in the system field and lets it replace the text.
+// editSystem calls fn for every text in the system field and lets it replace the text.
 func (r request) editSystem(fn func(string) string) {
 	switch s := r["system"].(type) {
 	case string:
@@ -98,7 +97,7 @@ func decide(cfg *config.Config, body []byte) (Decision, request, error) {
 		if err != nil {
 			return d, req, err
 		}
-		d.Body, d.Changed = out, true
+		d.Body = out
 	}
 	switch {
 	case agent != "":

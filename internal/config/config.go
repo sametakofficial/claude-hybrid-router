@@ -43,7 +43,7 @@ type Server struct {
 	PanelListen   string `yaml:"panel_listen" json:"panel_listen"`
 	PanelToken    string `yaml:"panel_token,omitempty" json:"panel_token"`
 	Upstream      string `yaml:"upstream" json:"upstream"`
-	HeaderTimeout int    `yaml:"header_timeout" json:"header_timeout"` // seconds
+	HeaderTimeout int    `yaml:"header_timeout" json:"header_timeout"` // seconds to wait for response headers (Anthropic and providers); needs a restart
 	AgentsDir     string `yaml:"agents_dir" json:"agents_dir"`
 	LogFile       string `yaml:"log_file" json:"log_file"`
 	// Claude subscription plan, used for the savings estimate on the dashboard:

@@ -6,7 +6,7 @@ server:
   panel_listen: 127.0.0.1:3458   # web panel
   panel_token: ""                # required if the panel listens beyond localhost
   upstream: https://api.anthropic.com
-  header_timeout: 300            # seconds to wait for a provider's first byte
+  header_timeout: 300            # seconds to wait for response headers (Anthropic and providers)
   agents_dir: ~/.claude/agents   # written as an absolute path by default
   log_file: ~/.claude-hybrid/proxy.log
 

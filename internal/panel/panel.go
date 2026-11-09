@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -94,7 +95,6 @@ func (p *Panel) Handler() http.Handler {
 	route("GET /api/providers", p.listProviders)
 	route("PUT /api/providers/{id}", p.putProvider)
 	route("DELETE /api/providers/{id}", p.deleteProvider)
-	route("POST /api/providers/{id}/models", p.fetchModels)
 	route("POST /api/providers/{id}/test", p.testProvider)
 	route("POST /api/providers/{id}/refresh", p.refreshModels)
 	route("POST /api/discover", p.discoverModels)
@@ -240,6 +240,8 @@ func keepKey(sent, stored string) string {
 
 // ---- status & logs ---------------------------------------------------------
 
+var lookPath = exec.LookPath // swapped in tests
+
 func (p *Panel) status(*http.Request) (any, error) {
 	cfg := p.Store.Get()
 	exe, _ := os.Executable()
@@ -365,18 +367,6 @@ func (p *Panel) provider(id string) (config.Provider, error) {
 		return pr, notFound("provider %q not found (save it first)", id)
 	}
 	return pr, nil
-}
-
-func (p *Panel) fetchModels(r *http.Request) (any, error) {
-	pr, err := p.provider(r.PathValue("id"))
-	if err != nil {
-		return nil, err
-	}
-	models, err := p.discover(r.Context(), pr)
-	if err != nil {
-		return nil, bad("%v", err)
-	}
-	return map[string]any{"models": models}, nil
 }
 
 // discoverModels fetches a model list for a provider that may not be saved
