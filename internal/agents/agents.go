@@ -7,20 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sametakofficial/claude-hybrid-router/internal/marker"
 )
-
-// MarkerRE matches the routing marker the proxy looks for in a subagent's
-// system prompt. Group 1 is the agent name.
-var MarkerRE = regexp.MustCompile(`<!--\s*claude-hybrid:agent=([A-Za-z0-9][A-Za-z0-9_.-]*)\s*-->`)
-
-// Marker returns the routing marker line for an agent.
-func Marker(name string) string { return "<!-- claude-hybrid:agent=" + name + " -->" }
 
 // Agent is one subagent file.
 type Agent struct {
@@ -83,7 +77,7 @@ func Parse(file string, data []byte) (Agent, error) {
 			}
 		}
 	}
-	body = MarkerRE.ReplaceAllString(body, "")
+	body = marker.AgentRE.ReplaceAllString(body, "")
 	a.Prompt = strings.Trim(body, "\n")
 	return a, nil
 }
@@ -122,7 +116,7 @@ func Render(a Agent) ([]byte, error) {
 		}
 	}
 	buf.WriteString("---\n")
-	buf.WriteString(Marker(a.Name) + "\n\n")
+	buf.WriteString(marker.Agent(a.Name) + "\n\n")
 	buf.WriteString(strings.Trim(a.Prompt, "\n"))
 	buf.WriteString("\n")
 	return buf.Bytes(), nil

@@ -121,7 +121,7 @@ func (e *env) entries(n int) []stats.Entry {
 	return e.rec.Since(0)
 }
 
-const marker = "<!-- claude-hybrid:agent=coder -->"
+const coderMarker = "<!-- claude-hybrid:agent=coder -->"
 
 func TestPlainRequestGoesToAnthropicUnchanged(t *testing.T) {
 	e := newEnv(t)
@@ -147,7 +147,7 @@ func TestPlainRequestGoesToAnthropicUnchanged(t *testing.T) {
 
 func TestAgentMarkerRoutesToOpenAIStreaming(t *testing.T) {
 	e := newEnv(t)
-	body := `{"model":"claude-sonnet","max_tokens":10,"stream":true,"system":[{"type":"text","text":"base"},{"type":"text","text":"` + strings.ReplaceAll(marker, `"`, `\"`) + `\nYou are coder"}],"messages":[{"role":"user","content":"hi"}]}`
+	body := `{"model":"claude-sonnet","max_tokens":10,"stream":true,"system":[{"type":"text","text":"base"},{"type":"text","text":"` + strings.ReplaceAll(coderMarker, `"`, `\"`) + `\nYou are coder"}],"messages":[{"role":"user","content":"hi"}]}`
 	resp, out := e.post("/v1/messages", body)
 	if resp.StatusCode != 200 || !strings.Contains(out, "event: message_start") || !strings.Contains(out, "hi from gpt") {
 		t.Fatalf("got %d %s", resp.StatusCode, out)
@@ -162,7 +162,7 @@ func TestAgentMarkerRoutesToOpenAIStreaming(t *testing.T) {
 		t.Fatalf("provider auth = %q", got)
 	}
 	if strings.Contains(e.openai.body, "claude-hybrid:agent") || strings.Contains(e.openai.body, "oauth") {
-		t.Fatalf("marker/token leaked: %s", e.openai.body)
+		t.Fatalf("coderMarker/token leaked: %s", e.openai.body)
 	}
 	if !strings.Contains(e.openai.body, `"model":"gpt-5"`) || !strings.Contains(e.openai.body, "EXTRA") || !strings.Contains(e.openai.body, "You are coder") {
 		t.Fatalf("route options not applied: %s", e.openai.body)
@@ -175,7 +175,7 @@ func TestAgentMarkerRoutesToOpenAIStreaming(t *testing.T) {
 
 func TestAgentMarkerNonStreaming(t *testing.T) {
 	e := newEnv(t)
-	body := `{"model":"claude-sonnet","max_tokens":10,"system":"` + strings.ReplaceAll(marker, `"`, `\"`) + `","messages":[{"role":"user","content":"hi"}]}`
+	body := `{"model":"claude-sonnet","max_tokens":10,"system":"` + strings.ReplaceAll(coderMarker, `"`, `\"`) + `","messages":[{"role":"user","content":"hi"}]}`
 	resp, out := e.post("/v1/messages", body)
 	var m map[string]any
 	json.Unmarshal([]byte(out), &m)
@@ -198,10 +198,10 @@ func TestUnroutedAgentGoesToAnthropicWithoutMarker(t *testing.T) {
 
 func TestMarkerInUserMessageIsIgnored(t *testing.T) {
 	e := newEnv(t)
-	body := `{"model":"claude-opus","system":"main","messages":[{"role":"user","content":[{"type":"text","text":"` + strings.ReplaceAll(marker, `"`, `\"`) + `"}]}]}`
+	body := `{"model":"claude-opus","system":"main","messages":[{"role":"user","content":[{"type":"text","text":"` + strings.ReplaceAll(coderMarker, `"`, `\"`) + `"}]}]}`
 	e.post("/v1/messages", body)
 	if e.upstream.hits != 1 || e.openai.hits != 0 {
-		t.Fatal("marker outside system must not reroute")
+		t.Fatal("coderMarker outside system must not reroute")
 	}
 }
 
@@ -226,7 +226,7 @@ func TestRuleRoutesToAnthropicProvider(t *testing.T) {
 func TestProviderAuthErrorIsNotPassedAs401(t *testing.T) {
 	e := newEnv(t)
 	e.openaiStatus = 401
-	resp, out := e.post("/v1/messages", `{"model":"m","system":"`+strings.ReplaceAll(marker, `"`, `\"`)+`","messages":[{"role":"user","content":"hi"}]}`)
+	resp, out := e.post("/v1/messages", `{"model":"m","system":"`+strings.ReplaceAll(coderMarker, `"`, `\"`)+`","messages":[{"role":"user","content":"hi"}]}`)
 	if resp.StatusCode != 400 {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
@@ -245,7 +245,7 @@ func TestDisabledProvider(t *testing.T) {
 
 func TestCountTokensForOpenAIRouteIsEstimated(t *testing.T) {
 	e := newEnv(t)
-	resp, out := e.post("/v1/messages/count_tokens", `{"model":"m","system":"`+strings.ReplaceAll(marker, `"`, `\"`)+`","messages":[{"role":"user","content":"hello there"}]}`)
+	resp, out := e.post("/v1/messages/count_tokens", `{"model":"m","system":"`+strings.ReplaceAll(coderMarker, `"`, `\"`)+`","messages":[{"role":"user","content":"hello there"}]}`)
 	if resp.StatusCode != 200 || !strings.Contains(out, "input_tokens") || e.openai.hits != 0 {
 		t.Fatalf("got %d %s", resp.StatusCode, out)
 	}
@@ -272,7 +272,7 @@ func TestLegacyMarker(t *testing.T) {
 	base := strings.TrimSuffix(e.cfg.Providers[1].BaseURL, "/")
 	e.post("/v1/messages", `{"model":"m","system":"<!-- @proxy-local-route:af83e9 url=`+base+` -->","messages":[]}`)
 	if e.anth.hits != 1 || strings.Contains(e.anth.body, "proxy-local-route") {
-		t.Fatalf("legacy marker: hits=%d body=%s", e.anth.hits, e.anth.body)
+		t.Fatalf("legacy coderMarker: hits=%d body=%s", e.anth.hits, e.anth.body)
 	}
 }
 

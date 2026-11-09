@@ -6,15 +6,11 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"regexp"
 	"strings"
 
-	"github.com/sametakofficial/claude-hybrid-router/internal/agents"
 	"github.com/sametakofficial/claude-hybrid-router/internal/config"
+	"github.com/sametakofficial/claude-hybrid-router/internal/marker"
 )
-
-// legacyRE matches the v1 marker, which carried the target URL directly.
-var legacyRE = regexp.MustCompile(`(?:<!--\s*)?@proxy-local-route:af83e9\s+url=(https?://[^\s>]+?)(?:\s*-->)?(?:\s|$)`)
 
 // Decision is where one request goes.
 type Decision struct {
@@ -62,19 +58,19 @@ func (r request) editSystem(fn func(string) string) {
 // main conversation.
 func (r request) findMarkers() (agent, legacyURL string, found bool) {
 	r.editSystem(func(t string) string {
-		if m := agents.MarkerRE.FindStringSubmatch(t); m != nil {
+		if m := marker.AgentRE.FindStringSubmatch(t); m != nil {
 			if agent == "" {
 				agent = m[1]
 			}
 			found = true
-			t = agents.MarkerRE.ReplaceAllString(t, "")
+			t = marker.AgentRE.ReplaceAllString(t, "")
 		}
-		if m := legacyRE.FindStringSubmatch(t); m != nil {
+		if m := marker.LegacyRE.FindStringSubmatch(t); m != nil {
 			if legacyURL == "" {
 				legacyURL = m[1]
 			}
 			found = true
-			t = legacyRE.ReplaceAllString(t, "")
+			t = marker.LegacyRE.ReplaceAllString(t, "")
 		}
 		if found {
 			t = strings.TrimSpace(t)

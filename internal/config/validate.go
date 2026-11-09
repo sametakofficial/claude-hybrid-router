@@ -9,15 +9,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/sametakofficial/claude-hybrid-router/internal/marker"
 )
 
-var (
-	idRE        = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	agentNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
-)
-
-// ValidAgentName reports whether s is safe to use as an agent file name.
-func ValidAgentName(s string) bool { return agentNameRE.MatchString(s) && !strings.Contains(s, "..") }
+var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 // ValidationError is a mistake in the config itself (as opposed to an I/O
 // failure while loading or saving it).
@@ -100,7 +96,7 @@ func (c *Config) Validate() error {
 		return nil
 	}
 	for name, r := range c.Agents {
-		if !ValidAgentName(name) {
+		if !marker.ValidName(name) {
 			return invalid("agent name %q is not valid", name)
 		}
 		if err := check("agent "+name, r); err != nil {

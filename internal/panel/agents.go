@@ -8,6 +8,7 @@ import (
 
 	"github.com/sametakofficial/claude-hybrid-router/internal/agents"
 	"github.com/sametakofficial/claude-hybrid-router/internal/config"
+	"github.com/sametakofficial/claude-hybrid-router/internal/marker"
 )
 
 type agentView struct {
@@ -61,7 +62,7 @@ func (p *Panel) putAgent(r *http.Request) (any, error) {
 	if in.Name == "" {
 		in.Name = oldName
 	}
-	if !config.ValidAgentName(in.Name) || !config.ValidAgentName(oldName) {
+	if !marker.ValidName(in.Name) || !marker.ValidName(oldName) {
 		return nil, bad("agent name may only use letters, digits, '.', '-' and '_'")
 	}
 	if strings.TrimSpace(in.Description) == "" {
@@ -110,7 +111,7 @@ func (p *Panel) putAgent(r *http.Request) (any, error) {
 
 func (p *Panel) deleteAgent(r *http.Request) (any, error) {
 	name := r.PathValue("name")
-	if !config.ValidAgentName(name) {
+	if !marker.ValidName(name) {
 		return nil, bad("invalid agent name")
 	}
 	dst, err := p.dir().Trash(name)
