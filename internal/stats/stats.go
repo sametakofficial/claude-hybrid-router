@@ -2,7 +2,9 @@
 package stats
 
 import (
+	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -141,4 +143,22 @@ func (r *Recorder) Summary() Summary {
 		return a.Target < b.Target
 	})
 	return s
+}
+
+// LogLine formats the entry for proxy.log. Fields are quoted: model names
+// come from requests and must not be able to start new lines in the log.
+func (e Entry) LogLine() string {
+	target := "anthropic"
+	if e.Provider != "" {
+		target = e.Provider + "/" + e.Model
+	}
+	source := e.Source
+	if source == "" {
+		source = "-"
+	}
+	line := fmt.Sprintf("%s %q %q -> %q status=%d %dms in=%d out=%d", e.Kind, source, e.ReqModel, target, e.Status, e.LatencyMS, e.InputTokens, e.OutputTokens)
+	if e.Error != "" {
+		line += " error=" + strconv.Quote(e.Error)
+	}
+	return line
 }
