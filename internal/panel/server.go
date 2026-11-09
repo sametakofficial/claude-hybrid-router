@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/sametakofficial/claude-hybrid-router/internal/config"
-	"github.com/sametakofficial/claude-hybrid-router/internal/proxy"
+	"github.com/sametakofficial/claude-hybrid-router/internal/provider"
 	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
 	"github.com/sametakofficial/claude-hybrid-router/internal/usage"
 )
@@ -27,23 +27,21 @@ var webFS embed.FS
 type Panel struct {
 	Store   *config.Store
 	Rec     *stats.Recorder
-	Proxy   *proxy.Proxy
 	Usage   *usage.Store // optional
 	Version string
 	Started time.Time
-	// Client is used to talk to providers (model discovery). Nil means a
-	// default client that never follows redirects. Tests set a fake.
+	// Client is used to talk to providers (model list, Test button). Nil
+	// means a default client. Tests set one that cannot leave loopback.
 	Client *http.Client
 }
 
-var defaultClient = &http.Client{
-	Timeout:       30 * time.Second,
-	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-}
+var defaultClient = provider.NewClient(provider.NewTransport(60 * time.Second))
 
-func (p *Panel) client() *http.Client {
+func (p *Panel) client() *provider.Client {
 	if p.Client != nil {
-		return p.Client
+		c := provider.NewClient(p.Client.Transport)
+		c.Retries = 0
+		return c
 	}
 	return defaultClient
 }

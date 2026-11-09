@@ -2,14 +2,12 @@ package panel
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/sametakofficial/claude-hybrid-router/internal/config"
+	"github.com/sametakofficial/claude-hybrid-router/internal/provider"
 )
 
 func (p *Panel) listProviders(*http.Request) (any, error) {
@@ -200,61 +198,13 @@ func (p *Panel) refreshModels(r *http.Request) (any, error) {
 	return viewProvider(saved), nil
 }
 
-// discover calls the provider's /models endpoint.
+// discover reads the provider's model list through its adapter.
 func (p *Panel) discover(ctx context.Context, pr config.Provider) ([]string, error) {
-	base := strings.TrimRight(pr.BaseURL, "/")
-	if pr.Type == config.TypeAnthropic {
-		base = strings.TrimSuffix(base, "/v1") + "/v1"
-	}
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/models", nil)
+	ad, err := provider.New(pr, p.client())
 	if err != nil {
 		return nil, err
 	}
-	if key := pr.Key(); key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
-		req.Header.Set("x-api-key", key)
-	}
-	req.Header.Set("anthropic-version", "2023-06-01")
-	for k, v := range pr.Headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := p.client().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch models: %v", err)
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch models: HTTP %d: %.300s", resp.StatusCode, strings.TrimSpace(string(data)))
-	}
-	var list struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-		Models []struct { // Ollama-style
-			Name string `json:"name"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(data, &list); err != nil {
-		return nil, fmt.Errorf("fetch models: unexpected reply: %.200s", string(data))
-	}
-	seen := map[string]bool{}
-	models := []string{}
-	add := func(m string) {
-		if m != "" && !seen[m] {
-			seen[m] = true
-			models = append(models, m)
-		}
-	}
-	for _, m := range list.Data {
-		add(m.ID)
-	}
-	for _, m := range list.Models {
-		add(m.Name)
-	}
-	return models, nil
+	return ad.ListModels(ctx)
 }
 
 func (p *Panel) testProvider(r *http.Request) (any, error) {
@@ -273,7 +223,11 @@ func (p *Panel) testProvider(r *http.Request) (any, error) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
-	reply, took, err := p.Proxy.Test(ctx, pr, in.Model)
+	ad, err := provider.New(pr, p.client())
+	if err != nil {
+		return nil, bad("%v", err)
+	}
+	reply, took, err := provider.Test(ctx, ad, in.Model)
 	res := map[string]any{"ok": err == nil, "latency_ms": took.Milliseconds(), "reply": reply, "error": ""}
 	if err != nil {
 		res["error"] = err.Error()

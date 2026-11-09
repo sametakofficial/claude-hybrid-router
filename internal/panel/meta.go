@@ -1,5 +1,7 @@
 package panel
 
+import "github.com/sametakofficial/claude-hybrid-router/internal/provider"
+
 // Choices the UI shows as selects, so nothing has to be typed by hand.
 
 type option struct {
@@ -31,9 +33,11 @@ type metaInfo struct {
 	Colors         []string        `json:"colors"`
 	RulePatterns   []rulePattern   `json:"rule_patterns"`
 	AgentTemplates []agentTemplate `json:"agent_templates"`
+	ProviderTypes  []provider.Spec `json:"provider_types"`
 }
 
 var meta = metaInfo{
+	ProviderTypes: provider.Registry,
 	Tools: []toolInfo{
 		{"Read", "Read files"},
 		{"Write", "Create files"},

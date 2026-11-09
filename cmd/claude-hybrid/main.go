@@ -184,7 +184,7 @@ func serve() error {
 	})
 	px := proxy.New(store.Current, rec)
 	px.OnUpstreamHeaders = us.ObserveHeaders
-	pn := &panel.Panel{Store: store, Rec: rec, Proxy: px, Usage: us, Version: version, Started: time.Now()}
+	pn := &panel.Panel{Store: store, Rec: rec, Usage: us, Version: version, Started: time.Now()}
 
 	proxyLn, err := net.Listen("tcp", cfg.Server.ProxyListen)
 	if err != nil {

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/sametakofficial/claude-hybrid-router/internal/config"
-	"github.com/sametakofficial/claude-hybrid-router/internal/proxy"
+	"github.com/sametakofficial/claude-hybrid-router/internal/provider"
 	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
 )
 
@@ -30,7 +30,7 @@ func setup(t *testing.T) (*Panel, http.Handler, string) {
 		return nil
 	})
 	rec := stats.New(10, nil)
-	p := &Panel{Store: st, Rec: rec, Proxy: proxy.New(st.Current, rec), Started: time.Now(), Client: offlineClient(t)}
+	p := &Panel{Store: st, Rec: rec, Started: time.Now(), Client: offlineClient(t)}
 	return p, p.Handler(), agentsDir
 }
 
@@ -213,5 +213,35 @@ func TestSettingsValidation(t *testing.T) {
 	}
 	if code, _ := do(h, "PUT", "/api/config/raw", `{"yaml":"version: 2\nserver: [oops"}`, map[string]string{"X-CHR-Token": "a-long-enough-token"}); code != 400 {
 		t.Fatalf("YAML syntax error must be 400, got %d", code)
+	}
+}
+
+func TestMetaProviderTypesAndPresets(t *testing.T) {
+	_, h, _ := setup(t)
+	_, out := do(h, "GET", "/api/meta", "", nil)
+	var m struct {
+		ProviderTypes []struct{ Name, Label, Help string } `json:"provider_types"`
+	}
+	json.Unmarshal([]byte(out), &m)
+	if len(m.ProviderTypes) != 2 || m.ProviderTypes[0].Name != "openai" || m.ProviderTypes[0].Label != "OpenAI-compatible" || m.ProviderTypes[1].Help == "" {
+		t.Fatalf("provider_types: %s", out)
+	}
+	for _, pr := range presets {
+		if _, err := provider.New(config.Provider{Type: pr.Type}, nil); err != nil {
+			t.Errorf("preset %s: %v", pr.ID, err)
+		}
+	}
+}
+
+func TestProviderTestButton(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}]}`)
+	}))
+	defer srv.Close()
+	p, h, _ := setup(t)
+	p.Store.Update(func(c *config.Config) error { c.Providers[0].BaseURL = srv.URL + "/v1"; return nil })
+	code, out := do(h, "POST", "/api/providers/gpt/test", `{"model":"m"}`, nil)
+	if code != 200 || !strings.Contains(out, `"ok":true`) || !strings.Contains(out, `"reply":"OK"`) {
+		t.Fatalf("%d %s", code, out)
 	}
 }
