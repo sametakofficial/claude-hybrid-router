@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/sametakofficial/claude-hybrid-router/internal/anthropic"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,7 +18,7 @@ import (
 // real requests use, and returns the reply text.
 func (p *Proxy) Test(ctx context.Context, prov config.Provider, model string) (string, time.Duration, error) {
 	body := `{"model":"claude-test","max_tokens":64,"messages":[{"role":"user","content":"Reply with the single word OK."}]}`
-	req, err := parseRequest([]byte(body))
+	req, err := anthropic.ParseRequest([]byte(body))
 	if err != nil {
 		return "", 0, err
 	}

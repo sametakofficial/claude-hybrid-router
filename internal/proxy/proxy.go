@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sametakofficial/claude-hybrid-router/internal/anthropic"
 	"github.com/sametakofficial/claude-hybrid-router/internal/config"
 	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
 	"github.com/sametakofficial/claude-hybrid-router/internal/translate"
@@ -88,7 +89,7 @@ func New(cfg func() *config.Config, rec *stats.Recorder) *Proxy {
 				return
 			}
 			log.Printf("upstream error %s %s: %v", r.Method, r.URL.Path, err)
-			writeError(w, http.StatusBadGateway, "api_error", "claude-hybrid: Anthropic upstream unreachable: "+err.Error())
+			anthropic.WriteError(w, http.StatusBadGateway, "claude-hybrid: Anthropic upstream unreachable: "+err.Error())
 		},
 	}
 	return p
@@ -115,7 +116,7 @@ func fromBrowser(r *http.Request) bool {
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if fromBrowser(r) {
-		writeError(w, http.StatusForbidden, "permission_error", "claude-hybrid: browser and non-local requests are not accepted")
+		anthropic.WriteError(w, http.StatusForbidden, "claude-hybrid: browser and non-local requests are not accepted")
 		return
 	}
 	if r.URL.Path == HealthPath {
@@ -132,11 +133,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	r.Body.Close()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "read body: "+err.Error())
+		anthropic.WriteError(w, http.StatusBadRequest, "read body: "+err.Error())
 		return
 	}
 	if len(body) > maxBody {
-		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body too large")
+		anthropic.WriteError(w, http.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
 
@@ -145,7 +146,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	countOnly := strings.HasSuffix(r.URL.Path, "/count_tokens")
 	entry := stats.Entry{Time: time.Now(), Path: r.URL.Path, Source: d.Source}
 	if req != nil {
-		entry.ReqModel, entry.Stream = req.model(), req.stream()
+		entry.ReqModel, entry.Stream = req.Model(), req.Stream()
 	}
 	if err != nil || (d.Route.IsAnthropic() && d.LegacyURL == "") {
 		// Anthropic subscription: forward untouched (minus the marker).
@@ -192,14 +193,13 @@ func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, body []byte,
 		p.up.ServeHTTP(w, r)
 		return
 	}
-	sw := &statusWriter{ResponseWriter: w}
+	sw := anthropic.NewUsageWriter(w)
 	start := time.Now()
 	p.up.ServeHTTP(sw, r)
-	e.Status, e.LatencyMS = sw.code(), time.Since(start).Milliseconds()
-	e.InputTokens, e.OutputTokens = sw.usage.in, sw.usage.out
-	e.CacheReadTokens, e.CacheWriteTokens = sw.usage.cacheRead, sw.usage.cacheWrite
+	e.Status, e.LatencyMS = sw.Status(), time.Since(start).Milliseconds()
+	setUsage(&e, sw.Usage())
 	if e.Status >= 400 {
-		e.Error = sw.errText()
+		e.Error = sw.ErrText()
 		if e.Status == http.StatusTooManyRequests {
 			e.Error = rateLimitInfo(sw.Header(), e.Error)
 		}
@@ -222,7 +222,7 @@ func rateLimitInfo(h http.Header, msg string) string {
 }
 
 func (p *Proxy) fail(w http.ResponseWriter, e stats.Entry, code int, msg string, countOnly bool) {
-	writeError(w, code, errType(code), msg)
+	anthropic.WriteError(w, code, msg)
 	if !countOnly {
 		e.Status, e.Error = code, msg
 		p.rec.Add(e)
@@ -272,7 +272,7 @@ func setProviderHeaders(h http.Header, prov config.Provider) {
 
 // toAnthropic forwards to an Anthropic-compatible provider. Client headers are
 // NOT copied, so the subscription token never leaves for a third party.
-func (p *Proxy) toAnthropic(w http.ResponseWriter, r *http.Request, prov config.Provider, rt config.Route, req request, e stats.Entry, countOnly bool) {
+func (p *Proxy) toAnthropic(w http.ResponseWriter, r *http.Request, prov config.Provider, rt config.Route, req anthropic.Request, e stats.Entry, countOnly bool) {
 	if rt.Model != "" {
 		req["model"] = rt.Model
 	}
@@ -316,7 +316,7 @@ func (p *Proxy) toAnthropic(w http.ResponseWriter, r *http.Request, prov config.
 	})
 	if err != nil {
 		if countOnly {
-			writeCountEstimate(w, body)
+			anthropic.WriteCount(w, anthropic.EstimateTokens(body))
 			return
 		}
 		p.fail(w, e, http.StatusBadGateway, fmt.Sprintf("claude-hybrid: provider %q unreachable: %v", prov.ID, err), countOnly)
@@ -324,27 +324,26 @@ func (p *Proxy) toAnthropic(w http.ResponseWriter, r *http.Request, prov config.
 	}
 	defer resp.Body.Close()
 	if countOnly && resp.StatusCode != http.StatusOK {
-		writeCountEstimate(w, body) // many compatible APIs lack count_tokens
+		anthropic.WriteCount(w, anthropic.EstimateTokens(body)) // many compatible APIs lack count_tokens
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
 		p.providerError(w, e, prov, resp, countOnly)
 		return
 	}
+	sw := anthropic.NewUsageWriter(w)
 	for _, k := range []string{"Content-Type", "Cache-Control"} {
 		if v := resp.Header.Get(k); v != "" {
-			w.Header().Set(k, v)
+			sw.Header().Set(k, v)
 		}
 	}
-	w.WriteHeader(http.StatusOK)
-	sw := &statusWriter{ResponseWriter: w, status: 200, sse: strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")}
+	sw.WriteHeader(http.StatusOK)
 	_, copyErr := copyFlush(sw, resp.Body)
 	if countOnly {
 		return
 	}
-	e.Status, e.LatencyMS = sw.code(), time.Since(start).Milliseconds()
-	e.InputTokens, e.OutputTokens = sw.usage.in, sw.usage.out
-	e.CacheReadTokens, e.CacheWriteTokens = sw.usage.cacheRead, sw.usage.cacheWrite
+	e.Status, e.LatencyMS = sw.Status(), time.Since(start).Milliseconds()
+	setUsage(&e, sw.Usage())
 	if copyErr != nil && r.Context().Err() == nil {
 		e.Error = "stream interrupted: " + copyErr.Error()
 	}
@@ -352,14 +351,14 @@ func (p *Proxy) toAnthropic(w http.ResponseWriter, r *http.Request, prov config.
 }
 
 // toOpenAI translates to Chat Completions and back.
-func (p *Proxy) toOpenAI(w http.ResponseWriter, r *http.Request, prov config.Provider, rt config.Route, req request, e stats.Entry, countOnly bool) {
+func (p *Proxy) toOpenAI(w http.ResponseWriter, r *http.Request, prov config.Provider, rt config.Route, req anthropic.Request, e stats.Entry, countOnly bool) {
 	raw, err := json.Marshal(req)
 	if err != nil {
 		p.fail(w, e, http.StatusBadRequest, "claude-hybrid: encode request: "+err.Error(), countOnly)
 		return
 	}
 	if countOnly {
-		writeCountEstimate(w, raw)
+		anthropic.WriteCount(w, anthropic.EstimateTokens(raw))
 		return
 	}
 	body, err := translate.ToOpenAI(raw, translate.Options{
@@ -461,27 +460,9 @@ func (p *Proxy) providerError(w http.ResponseWriter, e stats.Entry, prov config.
 	p.fail(w, e, code, msg, countOnly)
 }
 
-func errType(code int) string {
-	switch {
-	case code == http.StatusTooManyRequests:
-		return "rate_limit_error"
-	case code >= 500:
-		return "api_error"
-	}
-	return "invalid_request_error"
-}
-
-func writeError(w http.ResponseWriter, code int, typ, msg string) {
-	b, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}})
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	w.Write(b)
-}
-
-// writeCountEstimate answers count_tokens locally (about 4 chars per token).
-func writeCountEstimate(w http.ResponseWriter, body []byte) {
-	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"input_tokens":%d}`, len(body)/4+1)
+func setUsage(e *stats.Entry, u anthropic.Usage) {
+	e.InputTokens, e.OutputTokens = u.Input, u.Output
+	e.CacheReadTokens, e.CacheWriteTokens = u.CacheRead, u.CacheWrite
 }
 
 var redactRE = regexp.MustCompile(`(?i)(bearer\s+|sk-|key-)[A-Za-z0-9._\-]{8,}`)
