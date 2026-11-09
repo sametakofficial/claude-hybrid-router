@@ -71,7 +71,7 @@ func (c *sessionCache) saveToDisk() {
 	if c.diskPath == "" {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(c.diskPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(c.diskPath), 0o700); err != nil {
 		log.Printf("session cache: mkdir: %v", err)
 		return
 	}
@@ -80,7 +80,7 @@ func (c *sessionCache) saveToDisk() {
 		return
 	}
 	tmp := c.diskPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		log.Printf("session cache: write %s: %v", tmp, err)
 		return
 	}

@@ -12,28 +12,33 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/sametakofficial/claude-hybrid-router/internal/anthropic"
+	"github.com/sametakofficial/claude-hybrid-router/internal/config"
 )
 
 const (
 	defaultAgent = "general"
 	sessionTTL   = 2 * time.Hour
+	maxBody      = 16 << 20
 )
 
-var (
-	sessions     *sessionCache
-	sessionsPath string
-)
+// bridge holds the server state.
+type bridge struct {
+	sessions *sessionCache
+}
 
 func main() {
 	port := flag.Int("port", 4568, "port to listen on (Anthropic-compatible)")
@@ -41,25 +46,23 @@ func main() {
 		"JSON file for disk-persisted opencode session cache")
 	flag.Parse()
 
-	sessionsPath = *cachePath
-	sessions = newSessionCache(sessionsPath, sessionTTL)
-
-	http.HandleFunc("/v1/messages", handleMessages)
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	b := &bridge{sessions: newSessionCache(*cachePath, sessionTTL)}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages", b.handleMessages)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", *port)
-	log.Printf("opencode-bridge listening on %s (cache=%s)", addr, sessionsPath)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	log.Printf("opencode-bridge listening on %s (cache=%s)", addr, *cachePath)
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	log.Fatal(srv.ListenAndServe())
 }
 
+// defaultCachePath lives in the claude-hybrid home ($CLAUDE_HYBRID_HOME or
+// ~/.claude-hybrid).
 func defaultCachePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".claude-hybrid", "opencode-sessions.json")
+	return filepath.Join(config.Home(), "opencode-sessions.json")
 }
 
 // --- Anthropic request handling ---
@@ -76,21 +79,22 @@ type message struct {
 	Content json.RawMessage `json:"content"`
 }
 
-func handleMessages(w http.ResponseWriter, r *http.Request) {
+func (b *bridge) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	bodyBytes, err := readBody(r)
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
+	r.Body.Close()
 	if err != nil {
-		writeError(w, 400, "invalid_request_error", "Failed to read request body")
+		anthropic.WriteErrorType(w, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return
 	}
 
 	var req anthropicRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
-		writeError(w, 400, "invalid_request_error", "Failed to parse request body")
+		anthropic.WriteErrorType(w, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 		return
 	}
 
@@ -101,7 +105,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 	if toolOut, ok := extractLatestToolResult(req.Messages); ok {
 		sessionID, text := parseOpencodeOutput(toolOut)
 		if sessionID != "" {
-			sessions.Set(agent, sessionID)
+			b.sessions.Set(agent, sessionID)
 			log.Printf("TURN2 agent=%s → cached session %s (text=%d chars)",
 				agent, sessionID, len(text))
 		} else {
@@ -122,11 +126,11 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 	// Turn 1: build the opencode command and return as tool_use(Bash).
 	prompt := extractPrompt(req.Messages)
 	if prompt == "" {
-		writeError(w, 400, "invalid_request_error", "No user message found")
+		anthropic.WriteErrorType(w, http.StatusBadRequest, "invalid_request_error", "No user message found")
 		return
 	}
 
-	resumed := sessions.Get(agent)
+	resumed := b.sessions.Get(agent)
 	cmd := buildOpencodeCommand(agent, prompt, resumed)
 	if resumed != "" {
 		log.Printf("TURN1 agent=%s → resume=%s bash=%s", agent, resumed, truncate(cmd, 200))
@@ -290,17 +294,19 @@ func buildOpencodeCommand(agent, prompt, sessionID string) string {
 	b.WriteString("OPENCODE_NO_DEBUG=1 opencode run --format json")
 	if sessionID != "" {
 		b.WriteString(" --session ")
-		b.WriteString(sessionID)
+		b.WriteString(shellQuote(sessionID)) // comes from command output: never trust it in a shell
 	}
 	if agent != "" {
 		b.WriteString(" --agent ")
 		b.WriteString(agent)
 	}
-	b.WriteString(" '")
-	b.WriteString(strings.ReplaceAll(prompt, "'", "'\"'\"'"))
-	b.WriteString("'")
+	b.WriteString(" ")
+	b.WriteString(shellQuote(prompt))
 	return b.String()
 }
+
+// shellQuote single-quotes s for a POSIX shell.
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 
 // parseOpencodeOutput walks newline-delimited JSON events from `opencode run
 // --format json` and returns (sessionID, assistantText). Non-JSON lines are
@@ -340,191 +346,61 @@ func parseOpencodeOutput(out string) (sessionID, text string) {
 // --- Anthropic response writers ---
 
 func writeJSONToolUse(w http.ResponseWriter, model, command string) {
-	toolID := generateID("toolu_")
-	resp := map[string]interface{}{
-		"id":   generateID("msg_"),
-		"type": "message",
-		"role": "assistant",
-		"content": []map[string]interface{}{
-			{
-				"type": "tool_use",
-				"id":   toolID,
-				"name": "Bash",
-				"input": map[string]interface{}{
-					"command":     command,
-					"description": "opencode bridge",
-				},
-			},
-		},
-		"model":         model,
-		"stop_reason":   "tool_use",
-		"stop_sequence": nil,
-		"usage":         map[string]int{"input_tokens": 0, "output_tokens": 1},
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeMessage(w, model, false, toolUseBlock(command), "tool_use")
 }
 
 func writeJSONText(w http.ResponseWriter, model, text string) {
-	resp := map[string]interface{}{
-		"id":   generateID("msg_"),
-		"type": "message",
-		"role": "assistant",
-		"content": []map[string]interface{}{
-			{"type": "text", "text": text},
-		},
-		"model":         model,
-		"stop_reason":   "end_turn",
-		"stop_sequence": nil,
-		"usage":         map[string]int{"input_tokens": 0, "output_tokens": 1},
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeMessage(w, model, false, map[string]any{"type": "text", "text": text}, "end_turn")
 }
 
 func writeSSEToolUse(w http.ResponseWriter, model, command string) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeJSONToolUse(w, model, command)
-		return
-	}
-	toolID := generateID("toolu_")
-	msgID := generateID("msg_")
-	inputJSON, _ := json.Marshal(map[string]interface{}{
-		"command":     command,
-		"description": "opencode bridge",
-	})
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.WriteHeader(200)
-
-	events := []struct {
-		event string
-		data  interface{}
-	}{
-		{"message_start", map[string]interface{}{
-			"type": "message_start",
-			"message": map[string]interface{}{
-				"id": msgID, "type": "message", "role": "assistant",
-				"content": []interface{}{}, "model": model,
-				"stop_reason": nil, "stop_sequence": nil,
-				"usage": map[string]int{"input_tokens": 0, "output_tokens": 0},
-			},
-		}},
-		{"content_block_start", map[string]interface{}{
-			"type": "content_block_start", "index": 0,
-			"content_block": map[string]interface{}{
-				"type": "tool_use", "id": toolID, "name": "Bash",
-				"input": map[string]interface{}{},
-			},
-		}},
-		{"content_block_delta", map[string]interface{}{
-			"type": "content_block_delta", "index": 0,
-			"delta": map[string]interface{}{
-				"type":         "input_json_delta",
-				"partial_json": string(inputJSON),
-			},
-		}},
-		{"content_block_stop", map[string]interface{}{
-			"type": "content_block_stop", "index": 0,
-		}},
-		{"message_delta", map[string]interface{}{
-			"type":  "message_delta",
-			"delta": map[string]interface{}{"stop_reason": "tool_use", "stop_sequence": nil},
-			"usage": map[string]int{"output_tokens": 1},
-		}},
-		{"message_stop", map[string]interface{}{"type": "message_stop"}},
-	}
-	for _, ev := range events {
-		b, _ := json.Marshal(ev.data)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.event, b)
-	}
-	flusher.Flush()
+	writeMessage(w, model, true, toolUseBlock(command), "tool_use")
 }
 
 func writeSSEText(w http.ResponseWriter, model, text string) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeJSONText(w, model, text)
-		return
-	}
-	msgID := generateID("msg_")
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.WriteHeader(200)
-
-	events := []struct {
-		event string
-		data  interface{}
-	}{
-		{"message_start", map[string]interface{}{
-			"type": "message_start",
-			"message": map[string]interface{}{
-				"id": msgID, "type": "message", "role": "assistant",
-				"content": []interface{}{}, "model": model,
-				"stop_reason": nil, "stop_sequence": nil,
-				"usage": map[string]int{"input_tokens": 0, "output_tokens": 0},
-			},
-		}},
-		{"content_block_start", map[string]interface{}{
-			"type": "content_block_start", "index": 0,
-			"content_block": map[string]string{"type": "text", "text": ""},
-		}},
-		{"content_block_delta", map[string]interface{}{
-			"type": "content_block_delta", "index": 0,
-			"delta": map[string]string{"type": "text_delta", "text": text},
-		}},
-		{"content_block_stop", map[string]interface{}{
-			"type": "content_block_stop", "index": 0,
-		}},
-		{"message_delta", map[string]interface{}{
-			"type":  "message_delta",
-			"delta": map[string]interface{}{"stop_reason": "end_turn", "stop_sequence": nil},
-			"usage": map[string]int{"output_tokens": 1},
-		}},
-		{"message_stop", map[string]interface{}{"type": "message_stop"}},
-	}
-	for _, ev := range events {
-		b, _ := json.Marshal(ev.data)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.event, b)
-	}
-	flusher.Flush()
+	writeMessage(w, model, true, map[string]any{"type": "text", "text": text}, "end_turn")
 }
 
-func writeError(w http.ResponseWriter, status int, errType, msg string) {
-	resp := map[string]interface{}{
-		"type": "error",
-		"error": map[string]string{
-			"type":    errType,
-			"message": msg,
-		},
+func toolUseBlock(command string) map[string]any {
+	return map[string]any{
+		"type": "tool_use", "id": generateID("toolu_"), "name": "Bash",
+		"input": map[string]any{"command": command, "description": "opencode bridge"},
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(resp)
+}
+
+// writeMessage sends one assistant message with a single content block,
+// as JSON or as an SSE stream.
+func writeMessage(w http.ResponseWriter, model string, stream bool, block map[string]any, stop string) {
+	id := generateID("msg_")
+	if !stream {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id": id, "type": "message", "role": "assistant", "model": model,
+			"content": []any{block}, "stop_reason": stop, "stop_sequence": nil,
+			"usage": map[string]int{"input_tokens": 0, "output_tokens": 1},
+		})
+		return
+	}
+	sse := anthropic.StartSSE(w)
+	sse.Event("message_start", anthropic.MessageStart(id, model, 0))
+	start, delta := map[string]any{"type": "text", "text": ""}, map[string]any{"type": "text_delta", "text": block["text"]}
+	if block["type"] == "tool_use" {
+		input, _ := json.Marshal(block["input"])
+		start = map[string]any{"type": "tool_use", "id": block["id"], "name": block["name"], "input": map[string]any{}}
+		delta = map[string]any{"type": "input_json_delta", "partial_json": string(input)}
+	}
+	sse.Event("content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": start})
+	sse.Event("content_block_delta", map[string]any{"type": "content_block_delta", "index": 0, "delta": delta})
+	sse.Event("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
+	sse.Event("message_delta", map[string]any{
+		"type":  "message_delta",
+		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
+		"usage": map[string]int{"output_tokens": 1},
+	})
+	sse.Event("message_stop", map[string]any{"type": "message_stop"})
 }
 
 // --- helpers ---
-
-func readBody(r *http.Request) ([]byte, error) {
-	defer r.Body.Close()
-	var buf [1 << 20]byte // 1 MiB is more than enough for tool-use round-trips
-	var total []byte
-	for {
-		n, err := r.Body.Read(buf[:])
-		if n > 0 {
-			total = append(total, buf[:n]...)
-		}
-		if err != nil {
-			if err.Error() == "EOF" {
-				return total, nil
-			}
-			return total, err
-		}
-	}
-}
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
@@ -533,21 +409,8 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-const idChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-var idMu sync.Mutex
-var idCounter uint64
-
 func generateID(prefix string) string {
-	idMu.Lock()
-	defer idMu.Unlock()
-	idCounter++
-	now := time.Now().UnixNano()
-	mix := uint64(now) ^ idCounter*2654435761
-	b := make([]byte, 20)
-	for i := range b {
-		b[i] = idChars[mix%uint64(len(idChars))]
-		mix = mix/uint64(len(idChars)) + 1
-	}
-	return prefix + string(b)
+	b := make([]byte, 12)
+	rand.Read(b)
+	return prefix + hex.EncodeToString(b)
 }

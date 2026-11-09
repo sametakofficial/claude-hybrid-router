@@ -28,7 +28,10 @@ opencode --version
 go build -o opencode-bridge ./providers/opencode
 ```
 
-Or let the top-level `claude-hybrid` launcher build and start it for you.
+`claude-hybrid` does not build or start the bridge; run it yourself (or as
+your own service) and add it in the panel as an **Anthropic-compatible**
+provider with base URL `http://127.0.0.1:4568` (the "opencode-bridge (local)"
+template). Then route a subagent to it.
 
 ## Run
 
@@ -41,7 +44,7 @@ Flags:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--port` | `4568` | TCP port to listen on (HTTP, no TLS). |
-| `--cache` | `~/.claude-hybrid/opencode-sessions.json` | Disk-persisted agent → session ID map. |
+| `--cache` | `$CLAUDE_HYBRID_HOME/opencode-sessions.json` (default `~/.claude-hybrid/`) | Disk-persisted agent → session ID map (0600). |
 
 Verify:
 
@@ -62,16 +65,18 @@ anywhere inside `system` or any `messages[].content` text block. Characters
 allowed in NAME: `[A-Za-z0-9_-]`. If no marker is found, falls back to
 `general`.
 
-To route a specific Claude Code subagent to a specific opencode agent, add a
-second marker alongside the routing one in the subagent's `.md` file:
+To pick the opencode agent for a Claude Code subagent, put this line in the
+subagent's prompt (in the panel, or in its `.md` file below the routing
+marker):
 
 ```markdown
-<!-- @proxy-local-route:af83e9 url=http://127.0.0.1:4568 -->
 <!-- @opencode-agent:simplifier -->
 ```
 
-The core proxy strips only the first marker (`@proxy-local-route`). The
-second one rides along in the body untouched and is read here.
+claude-hybrid removes only its own routing marker; this one rides along in
+the system prompt and is read here. With the route's system prompt mode
+`replace`, Claude Code's system prompt (and so this line) is not sent:
+put the line into the replacement text instead, or use `keep` / `append`.
 
 ## Session cache
 
@@ -87,7 +92,8 @@ Rules:
 
 * Keyed by the detected agent name.
 * TTL = 2 hours, refreshed on every use (GET-as-touch).
-* Atomic writes (tempfile + rename) — safe across concurrent invocations.
+* Atomic writes (tempfile + rename), file mode 0600.
+* The session id is shell-quoted in the generated command.
 * Stale entries are dropped on load, so a long-quiet agent doesn't resurface.
 
 Wipe the file to make every agent start fresh.
@@ -119,7 +125,7 @@ SSE streaming is supported (`Accept: text/event-stream`) for both turns.
 go test ./providers/opencode/ -v
 ```
 
-19 unit tests cover: agent detection (string/block system, user messages,
+The tests cover: agent detection (string/block system, user messages,
 fallback), prompt extraction (backwards walk, system-reminder stripping),
 tool_result extraction (string/block array), opencode command building
 (session injection, quote escaping), output parsing (session+text, raw

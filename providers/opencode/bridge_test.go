@@ -2,6 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -134,7 +138,13 @@ func TestBuildOpencodeCommand(t *testing.T) {
 		{
 			name:  "resumed session",
 			agent: "simplifier", prompt: "hello", sessionID: "ses_abc",
-			wantHas: []string{"--session ses_abc", "--agent simplifier"},
+			wantHas: []string{"--session 'ses_abc'", "--agent simplifier"},
+		},
+		{
+			name:  "hostile session id is quoted",
+			agent: "general", prompt: "x", sessionID: "ses; rm -rf ~",
+			wantHas:   []string{`--session 'ses; rm -rf ~'`},
+			wantOmits: []string{"--session ses;"},
 		},
 		{
 			name:  "quote escape",
@@ -252,5 +262,35 @@ func TestSessionCache_SkipsStaleOnLoad(t *testing.T) {
 	c2 := newSessionCache(path, 10*time.Millisecond)
 	if got := c2.Get("simplifier"); got != "" {
 		t.Errorf("expected stale drop, got %q", got)
+	}
+}
+
+func TestHandlerTwoTurns(t *testing.T) {
+	b := &bridge{sessions: newSessionCache("", time.Hour)}
+	srv := httptest.NewServer(http.HandlerFunc(b.handleMessages))
+	defer srv.Close()
+	post := func(body string) string {
+		resp, err := http.Post(srv.URL, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		return string(out)
+	}
+	out := post(`{"model":"m","stream":true,"system":"<!-- @opencode-agent:coder -->","messages":[{"role":"user","content":"hi"}]}`)
+	if !strings.Contains(out, "event: message_start") || !strings.Contains(out, `"tool_use"`) || !strings.Contains(out, "--agent coder") {
+		t.Fatalf("turn 1: %s", out)
+	}
+	out = post(`{"model":"m","system":"<!-- @opencode-agent:coder -->","messages":[{"role":"user","content":"hi"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"{\"type\":\"text\",\"sessionID\":\"ses_9\",\"part\":{\"text\":\"done\"}}"}]}]}`)
+	if !strings.Contains(out, `"text":"done"`) || b.sessions.Get("coder") != "ses_9" {
+		t.Fatalf("turn 2: %s", out)
+	}
+}
+
+func TestCachePathFollowsHome(t *testing.T) {
+	t.Setenv("CLAUDE_HYBRID_HOME", "/tmp/x-home")
+	if got := defaultCachePath(); got != filepath.Join("/tmp/x-home", "opencode-sessions.json") {
+		t.Fatal(got)
 	}
 }
