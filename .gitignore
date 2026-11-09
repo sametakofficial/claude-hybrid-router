@@ -15,3 +15,4 @@ coverage.out
 .devcontainer/
 .worktrees/
 .deleted/
+/opencode
