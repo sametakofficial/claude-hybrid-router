@@ -22,6 +22,7 @@ import (
 
 	"github.com/sametakofficial/claude-hybrid-router/internal/anthropic"
 	"github.com/sametakofficial/claude-hybrid-router/internal/config"
+	"github.com/sametakofficial/claude-hybrid-router/internal/router"
 	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
 	"github.com/sametakofficial/claude-hybrid-router/internal/translate"
 )
@@ -142,13 +143,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := p.cfg()
-	d, req, err := decide(cfg, body)
+	d, err := router.Decide(cfg, body)
+	req := d.Req
 	countOnly := strings.HasSuffix(r.URL.Path, "/count_tokens")
-	entry := stats.Entry{Time: time.Now(), Path: r.URL.Path, Source: d.Source}
+	entry := stats.Entry{Time: time.Now(), Path: r.URL.Path, Source: d.Source()}
 	if req != nil {
 		entry.ReqModel, entry.Stream = req.Model(), req.Stream()
 	}
-	if err != nil || (d.Route.IsAnthropic() && d.LegacyURL == "") {
+	if err != nil || d.Subscription() {
 		// Anthropic subscription: forward untouched (minus the marker).
 		entry.Kind = "anthropic"
 		p.passthrough(w, r, d.Body, entry, countOnly)
@@ -157,7 +159,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	entry.Kind = "routed"
 	switch {
-	case d.LegacyURL != "":
+	case d.Via == router.ViaLegacy:
 		entry.Provider = "legacy"
 		entry.Model = entry.ReqModel
 		prov := config.Provider{ID: "legacy", Type: config.TypeAnthropic, BaseURL: d.LegacyURL}
@@ -170,11 +172,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			entry.Model = entry.ReqModel
 		}
 		if !ok || !prov.Enabled {
-			msg := fmt.Sprintf("claude-hybrid: provider %q for %s is missing or disabled", d.Route.Provider, d.Source)
+			msg := fmt.Sprintf("claude-hybrid: provider %q for %s is missing or disabled", d.Route.Provider, d.Source())
 			p.fail(w, entry, http.StatusBadRequest, msg, countOnly)
 			return
 		}
-		applyRoute(req, d.Route)
+		router.Apply(req, d.Route)
 		if prov.Type == config.TypeAnthropic {
 			p.toAnthropic(w, r, prov, d.Route, req, entry, countOnly)
 		} else {
