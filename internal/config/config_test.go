@@ -161,3 +161,30 @@ func TestLoadDoesNotCreateTheFile(t *testing.T) {
 		t.Fatal("Load must not create config.yaml")
 	}
 }
+
+func TestParseMigratesAndRejects(t *testing.T) {
+	c, err := Parse([]byte("server:\n  plan: pro\nproviders:\n  - id: a\n    base_url: https://a/v1\n"))
+	if err != nil || c.Version != CurrentVersion || c.Server.Plan != "pro" || len(c.Providers) != 1 {
+		t.Fatalf("version 0 doc: %+v %v", c, err)
+	}
+	for name, doc := range map[string]string{
+		"empty":    "",
+		"comments": "# nothing here\n",
+		"newer":    "version: 99\n",
+		"v1":       "version: 1\n",
+		"list":     "- a\n",
+		"badver":   "version: two\n",
+	} {
+		if _, err := Parse([]byte(doc)); err == nil {
+			t.Errorf("%s: want an error", name)
+		}
+	}
+}
+
+func TestOpenRefusesEmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	os.WriteFile(path, nil, 0o600)
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty config must not load as defaults: %v", err)
+	}
+}
