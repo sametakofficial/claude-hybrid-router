@@ -35,11 +35,12 @@ func (p *Proxy) routed(w http.ResponseWriter, r *http.Request, prov config.Provi
 		return
 	}
 	defer reply.Close()
-	u, err := reply.WriteTo(w)
-	e.Status, e.LatencyMS = http.StatusOK, time.Since(start).Milliseconds()
+	sw := anthropic.NewUsageWriter(w) // for the status the reply actually sent
+	u, err := reply.WriteTo(sw)
+	e.Status, e.LatencyMS = sw.Status(), time.Since(start).Milliseconds()
 	setUsage(&e, u)
 	if err != nil && r.Context().Err() == nil {
-		e.Error = err.Error()
+		e.Error = provider.Redact(err.Error())
 	}
 	p.rec.Add(e)
 }

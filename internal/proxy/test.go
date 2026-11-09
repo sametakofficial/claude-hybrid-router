@@ -27,11 +27,7 @@ func (p *Proxy) Test(ctx context.Context, prov config.Provider, model string) (s
 	rt := config.Route{Provider: prov.ID, Model: model}
 	e := stats.Entry{Kind: "routed", Source: "test", Path: "/v1/messages", ReqModel: "claude-test", Provider: prov.ID, Model: model, Time: time.Now()}
 	start := time.Now()
-	if prov.Type == config.TypeAnthropic {
-		p.routed(w, r, prov, rt, req, e, false)
-	} else {
-		p.toOpenAI(w, r, prov, rt, req, e, false)
-	}
+	p.routed(w, r, prov, rt, req, e, false)
 	took := time.Since(start)
 	var out struct {
 		Content []struct {

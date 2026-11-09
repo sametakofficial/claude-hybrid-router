@@ -1,11 +1,13 @@
-// Package translate converts between the Anthropic Messages API and the
+// Package openaichat converts between the Anthropic Messages API and the
 // OpenAI Chat Completions API.
-package translate
+package openaichat
 
 import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/sametakofficial/claude-hybrid-router/internal/anthropic"
 )
 
 // Options adjusts the translated request.
@@ -38,6 +40,8 @@ type message struct {
 type block struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text"`
+	Thinking  string          `json:"thinking"`
+	Signature string          `json:"signature"`
 	Source    *source         `json:"source"`
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
@@ -167,7 +171,8 @@ func ToOpenAI(body []byte, opt Options) ([]byte, error) {
 		}
 		switch m.Role {
 		case "assistant":
-			var texts []string
+			var texts, reasoning []string
+			var reasoningField string
 			var calls []map[string]any
 			for _, b := range bs {
 				switch b.Type {
@@ -175,7 +180,7 @@ func ToOpenAI(body []byte, opt Options) ([]byte, error) {
 					if b.Text != "" {
 						texts = append(texts, b.Text)
 					}
-				case "tool_use", "server_tool_use":
+				case "tool_use":
 					args := string(b.Input)
 					if args == "" || args == "null" {
 						args = "{}"
@@ -184,8 +189,19 @@ func ToOpenAI(body []byte, opt Options) ([]byte, error) {
 						"id": b.ID, "type": "function",
 						"function": map[string]any{"name": b.Name, "arguments": args},
 					})
+				case "thinking":
+					// Reasoning this provider sent earlier (we made the block):
+					// send it back in the same field. DeepSeek-style APIs need
+					// it during tool loops. Real Anthropic thinking has no
+					// OpenAI equivalent and is dropped.
+					if f, ok := strings.CutPrefix(b.Signature, anthropic.SignaturePrefix); ok && b.Thinking != "" && (f == "reasoning_content" || f == "reasoning") {
+						reasoning, reasoningField = append(reasoning, b.Thinking), f
+					}
 				}
-				// thinking / redacted_thinking blocks have no OpenAI equivalent.
+				// server_tool_use and its *_tool_result blocks ran on
+				// Anthropic's side; as OpenAI tool calls they would have no
+				// tool reply and the request would be rejected. Dropped, like
+				// redacted_thinking.
 			}
 			if len(texts) == 0 && len(calls) == 0 {
 				continue
@@ -193,6 +209,9 @@ func ToOpenAI(body []byte, opt Options) ([]byte, error) {
 			am := map[string]any{"role": "assistant", "content": strings.Join(texts, "\n\n")}
 			if len(calls) > 0 {
 				am["tool_calls"] = calls
+			}
+			if len(reasoning) > 0 {
+				am[reasoningField] = strings.Join(reasoning, "\n\n")
 			}
 			msgs = append(msgs, am)
 

@@ -66,31 +66,35 @@ func Decide(cfg *config.Config, body []byte) (Decision, error) {
 	}
 	d.Req = req
 	agent, legacyURL, found := findMarkers(req)
-	if found {
-		out, err := json.Marshal(req)
-		if err != nil {
-			return d, err
-		}
-		d.Body = out
-	}
 	switch {
 	case agent != "":
 		d.Via, d.Agent = ViaAgent, agent
 		d.Route = cfg.Agents[agent] // missing entry = Anthropic
-		return d, nil
 	case legacyURL != "" && isLoopbackURL(legacyURL):
 		// v1 markers carry their own URL. Only local URLs are honoured: a
 		// project agent file from a cloned repo must not be able to send the
 		// conversation to an arbitrary server.
 		d.Via, d.LegacyURL = ViaLegacy, legacyURL
-		return d, nil
-	}
-	model := req.Model()
-	for i, rule := range cfg.Rules {
-		if rule.Matches(model) {
-			d.Via, d.Rule, d.Route = ViaRule, i+1, rule.Route
-			return d, nil
+	default:
+		model := req.Model()
+		for i, rule := range cfg.Rules {
+			if rule.Matches(model) {
+				d.Via, d.Rule, d.Route = ViaRule, i+1, rule.Route
+				break
+			}
 		}
+	}
+	if found {
+		// A subagent that used to run on an OpenAI-style provider may carry
+		// reasoning blocks we made; Anthropic would reject their signature.
+		if d.Subscription() {
+			anthropic.DropPlaceholderThinking(req)
+		}
+		out, err := json.Marshal(req)
+		if err != nil {
+			return d, err
+		}
+		d.Body = out
 	}
 	return d, nil
 }

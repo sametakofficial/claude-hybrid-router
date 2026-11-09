@@ -2,6 +2,7 @@ package router
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/sametakofficial/claude-hybrid-router/internal/anthropic"
@@ -82,5 +83,18 @@ func TestApply(t *testing.T) {
 	}
 	if got := sys(`{}`, config.Route{SystemMode: config.SystemAppend, SystemPrompt: "x"}); got != `[{"text":"x","type":"text"}]` {
 		t.Fatal(got)
+	}
+}
+
+func TestPlaceholderThinkingNeverReachesAnthropic(t *testing.T) {
+	body := `{"model":"claude-opus","system":"<!-- claude-hybrid:agent=plain -->x","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"claude-hybrid:reasoning_content"},{"type":"text","text":"a"}]}]}`
+	d, _ := Decide(testConfig(), []byte(body))
+	if !d.Subscription() || strings.Contains(string(d.Body), "claude-hybrid:reasoning") {
+		t.Fatalf("%s", d.Body)
+	}
+	// Routed to the OpenAI provider, the block stays (it is sent back as reasoning).
+	d, _ = Decide(testConfig(), []byte(strings.Replace(body, "agent=plain", "agent=coder", 1)))
+	if d.Subscription() || !strings.Contains(string(d.Body), "claude-hybrid:reasoning") {
+		t.Fatalf("%s", d.Body)
 	}
 }

@@ -141,14 +141,22 @@ func TestWatchReloadsOutsideEditsOnly(t *testing.T) {
 		t.Fatalf("own write must not trigger a reload: %s", l)
 	case <-time.After(50 * time.Millisecond):
 	}
+	// os.WriteFile truncates first, so the watcher may see an empty file
+	// for a moment; that is refused (logged), then the full file loads.
 	os.WriteFile(path, []byte("version: 2\nserver:\n  plan: max20\n"), 0o600)
-	select {
-	case l := <-logs:
-		if !strings.Contains(l, "reloaded") || s.Current().Server.Plan != "max20" {
-			t.Fatalf("log %q plan %q", l, s.Current().Server.Plan)
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case l := <-logs:
+			if strings.Contains(l, "reloaded") {
+				if s.Current().Server.Plan != "max20" {
+					t.Fatalf("plan %q", s.Current().Server.Plan)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("outside edit not reloaded")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("outside edit not reloaded")
 	}
 }
 

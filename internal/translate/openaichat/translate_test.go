@@ -1,4 +1,4 @@
-package translate
+package openaichat
 
 import (
 	"bytes"
@@ -152,7 +152,7 @@ func TestStream(t *testing.T) {
 		`data: [DONE]`, ``,
 	}, "\n")
 	var buf bytes.Buffer
-	u, err := NewStream(&buf, nil, "claude-x").Run(strings.NewReader(src))
+	u, err := NewStream(&buf, nil, "claude-x", 0).Run(strings.NewReader(src))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestStream(t *testing.T) {
 func TestStreamToolCallsWithoutIndex(t *testing.T) {
 	src := `data: {"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"name":"A","arguments":"{}"}},{"id":"b","function":{"name":"B","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}` + "\n\ndata: [DONE]\n"
 	var buf bytes.Buffer
-	if _, err := NewStream(&buf, nil, "m").Run(strings.NewReader(src)); err != nil {
+	if _, err := NewStream(&buf, nil, "m", 0).Run(strings.NewReader(src)); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Count(buf.String(), `"type":"tool_use"`) != 2 {
@@ -194,16 +194,16 @@ func TestStreamToolCallsWithoutIndex(t *testing.T) {
 
 func TestStreamEmptyAndErrors(t *testing.T) {
 	var buf bytes.Buffer
-	if _, err := NewStream(&buf, nil, "m").Run(strings.NewReader("")); err == nil || !strings.Contains(buf.String(), "event: error") {
+	if _, err := NewStream(&buf, nil, "m", 0).Run(strings.NewReader("")); err == nil || !strings.Contains(buf.String(), "event: error") {
 		t.Fatalf("empty stream should send an error event, got %q", buf.String())
 	}
 	buf.Reset()
-	if _, err := NewStream(&buf, nil, "m").Run(strings.NewReader(`data: {"error":{"message":"quota"}}` + "\n")); err == nil || !strings.Contains(buf.String(), "quota") {
+	if _, err := NewStream(&buf, nil, "m", 0).Run(strings.NewReader(`data: {"error":{"message":"quota"}}` + "\n")); err == nil || !strings.Contains(buf.String(), "quota") {
 		t.Fatalf("provider error should be passed on, got %q", buf.String())
 	}
 	buf.Reset()
 	// finish without any content still yields one (empty) text block
-	if _, err := NewStream(&buf, nil, "m").Run(strings.NewReader(`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\ndata: [DONE]\n")); err != nil {
+	if _, err := NewStream(&buf, nil, "m", 0).Run(strings.NewReader(`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\ndata: [DONE]\n")); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "content_block_start") || !strings.Contains(buf.String(), "end_turn") {

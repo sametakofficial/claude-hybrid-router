@@ -181,6 +181,7 @@ func PrepareAnthropic(body anthropic.Request, rt config.Route) anthropic.Request
 	}
 	clampThinking(body)
 	stripBeta(body)
+	anthropic.DropPlaceholderThinking(body)
 	return body
 }
 

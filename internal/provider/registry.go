@@ -20,6 +20,7 @@ var Registry = []Spec{
 	{
 		Name: config.TypeOpenAI, Label: "OpenAI-compatible",
 		Help: "Chat Completions API ({base_url}/chat/completions). Requests are translated; most providers, gateways and local servers speak it.",
+		New:  newOpenAI,
 	},
 	{
 		Name: config.TypeAnthropic, Label: "Anthropic-compatible",

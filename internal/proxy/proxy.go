@@ -159,11 +159,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		router.Apply(req, d.Route)
-		if prov.Type == config.TypeOpenAI {
-			p.toOpenAI(w, r, prov, d.Route, req, entry, countOnly)
-		} else {
-			p.routed(w, r, prov, d.Route, req, entry, countOnly)
-		}
+		p.routed(w, r, prov, d.Route, req, entry, countOnly)
 	}
 }
 
