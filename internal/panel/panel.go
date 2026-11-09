@@ -102,9 +102,9 @@ func (p *Panel) Handler() http.Handler {
 	route("GET /api/agents", p.listAgents)
 	route("PUT /api/agents/{name}", p.putAgent)
 	route("DELETE /api/agents/{name}", p.deleteAgent)
-	route("GET /api/rules", func(*http.Request) (any, error) { return nonNil(p.Store.Get().Rules), nil })
+	route("GET /api/rules", func(*http.Request) (any, error) { return nonNil(p.Store.Current().Rules), nil })
 	route("PUT /api/rules", p.putRules)
-	route("GET /api/settings", func(*http.Request) (any, error) { return maskSettings(p.Store.Get().Server), nil })
+	route("GET /api/settings", func(*http.Request) (any, error) { return maskSettings(p.Store.Current().Server), nil })
 	route("PUT /api/settings", p.putSettings)
 	route("GET /api/logs", p.logs)
 	route("GET /api/config/raw", p.getRaw)
@@ -124,7 +124,7 @@ func (p *Panel) Handler() http.Handler {
 // never approve). With a token set, the token is required as well.
 func (p *Panel) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := p.Store.Get().Server.PanelToken
+		token := p.Store.Current().Server.PanelToken
 		if token == "" && !isLoopbackHost(r.Host) {
 			http.Error(w, "claude-hybrid panel: set server.panel_token to allow non-localhost access", http.StatusForbidden)
 			return
@@ -243,7 +243,7 @@ func keepKey(sent, stored string) string {
 var lookPath = exec.LookPath // swapped in tests
 
 func (p *Panel) status(*http.Request) (any, error) {
-	cfg := p.Store.Get()
+	cfg := p.Store.Current()
 	exe, _ := os.Executable()
 	launch := "claude-hybrid"
 	if exe != "" {
@@ -271,7 +271,7 @@ func (p *Panel) logs(r *http.Request) (any, error) {
 // ---- providers -------------------------------------------------------------
 
 func (p *Panel) listProviders(*http.Request) (any, error) {
-	cfg := p.Store.Get()
+	cfg := p.Store.Current()
 	out := make([]providerView, 0, len(cfg.Providers))
 	for _, pr := range cfg.Providers {
 		out = append(out, viewProvider(pr))
@@ -303,7 +303,7 @@ func (p *Panel) putProvider(r *http.Request) (any, error) {
 	create := r.URL.Query().Get("create") == "1"
 	if len(in.Models) == 0 {
 		probe := in
-		if old, ok := p.Store.Get().Provider(id); ok && !create {
+		if old, ok := p.Store.Current().Provider(id); ok && !create {
 			probe.APIKey = keepKey(in.APIKey, old.APIKey)
 		}
 		if models, err := p.discover(r.Context(), probe); err == nil {
@@ -362,7 +362,7 @@ func (p *Panel) deleteProvider(r *http.Request) (any, error) {
 }
 
 func (p *Panel) provider(id string) (config.Provider, error) {
-	pr, ok := p.Store.Get().Provider(id)
+	pr, ok := p.Store.Current().Provider(id)
 	if !ok {
 		return pr, notFound("provider %q not found (save it first)", id)
 	}
@@ -380,7 +380,7 @@ func (p *Panel) discoverModels(r *http.Request) (any, error) {
 	if !strings.HasPrefix(in.BaseURL, "http://") && !strings.HasPrefix(in.BaseURL, "https://") {
 		return nil, bad("base URL must start with http:// or https://")
 	}
-	if old, ok := p.Store.Get().Provider(in.ID); ok && in.ID != "" && strings.TrimRight(old.BaseURL, "/") == in.BaseURL {
+	if old, ok := p.Store.Current().Provider(in.ID); ok && in.ID != "" && strings.TrimRight(old.BaseURL, "/") == in.BaseURL {
 		// The stored key is only sent to the URL it was saved for.
 		in.APIKey = keepKey(in.APIKey, old.APIKey)
 		in.APIKeyEnv = old.APIKeyEnv
@@ -509,7 +509,7 @@ type agentView struct {
 }
 
 func (p *Panel) dir() agents.Dir {
-	return agents.Dir{Path: p.Store.Get().Server.AgentsDir, TrashDir: filepath.Join(config.Home(), "trash")}
+	return agents.Dir{Path: p.Store.Current().Server.AgentsDir, TrashDir: filepath.Join(config.Home(), "trash")}
 }
 
 func routeOrDefault(rt config.Route) config.Route {
@@ -524,7 +524,7 @@ func (p *Panel) listAgents(*http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg := p.Store.Get()
+	cfg := p.Store.Current()
 	out := make([]agentView, 0, len(list))
 	for _, a := range list {
 		out = append(out, agentView{Agent: a, Route: routeOrDefault(cfg.Agents[a.Name])})
@@ -563,7 +563,7 @@ func (p *Panel) putAgent(r *http.Request) (any, error) {
 	rt := cleanRoute(in.Route)
 	// Check the route before touching any file.
 	if rt.Provider != "" {
-		if _, ok := p.Store.Get().Provider(rt.Provider); !ok {
+		if _, ok := p.Store.Current().Provider(rt.Provider); !ok {
 			return nil, bad("unknown provider %q", rt.Provider)
 		}
 	}

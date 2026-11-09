@@ -313,7 +313,8 @@ func Open(path string) (*Store, error) {
 // Path returns the config file path.
 func (s *Store) Path() string { return s.path }
 
-// Get returns a copy of the current config.
+// Get returns a deep copy of the current config (a YAML round trip, so it is
+// not cheap). Use it only when the result will be modified; read with Current.
 func (s *Store) Get() *Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
