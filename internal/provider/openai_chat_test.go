@@ -54,6 +54,11 @@ func TestOpenAIAdapterSniffsTheBody(t *testing.T) {
 	if out := send(`{"model":"m","messages":[{"role":"user","content":"x"}]}`); !strings.Contains(out, `"type":"message"`) || !strings.Contains(out, `"claude-x"`) {
 		t.Fatalf("json: %s", out)
 	}
+	// no stream asked, provider streamed anyway: collected into one message.
+	mode = "sse"
+	if out := send(`{"model":"m","messages":[{"role":"user","content":"x"}]}`); !strings.Contains(out, `"text":"first second"`) || !strings.Contains(out, `"end_turn"`) {
+		t.Fatalf("sse collected: %s", out)
+	}
 	bad := newOpenAI(config.Provider{ID: "gpt", BaseURL: srv.URL + "/v1", APIKey: "wrong"}, NewClient(NewTransport(time.Second)))
 	_, err := bad.Messages(context.Background(), &Request{Body: parse(t, `{"model":"m","messages":[]}`)})
 	var ue *UpstreamError

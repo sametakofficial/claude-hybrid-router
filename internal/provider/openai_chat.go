@@ -125,17 +125,19 @@ func (r *openAIReply) WriteTo(w http.ResponseWriter) (anthropic.Usage, error) {
 		}
 		return u.Wire(), err
 	}
-	if isSSE {
-		err := fmt.Errorf("provider %q streamed although no stream was asked for", r.id)
-		anthropic.WriteError(w, http.StatusBadGateway, "claude-hybrid: "+err.Error())
-		return anthropic.Usage{}, err
+	var out []byte
+	var u openaichat.Usage
+	var err error
+	if isSSE { // streamed although stream=false: collect it
+		out, u, err = openaichat.FromOpenAIStream(io.LimitReader(br, maxReply), r.model)
+	} else {
+		data, rerr := io.ReadAll(io.LimitReader(br, maxReply))
+		if rerr != nil {
+			anthropic.WriteError(w, http.StatusBadGateway, "claude-hybrid: read provider response: "+rerr.Error())
+			return anthropic.Usage{}, rerr
+		}
+		out, u, err = openaichat.FromOpenAI(data, r.model)
 	}
-	data, err := io.ReadAll(io.LimitReader(br, maxReply))
-	if err != nil {
-		anthropic.WriteError(w, http.StatusBadGateway, "claude-hybrid: read provider response: "+err.Error())
-		return anthropic.Usage{}, err
-	}
-	out, u, err := openaichat.FromOpenAI(data, r.model)
 	if err != nil {
 		anthropic.WriteError(w, http.StatusBadGateway, fmt.Sprintf("claude-hybrid: provider %q: %v", r.id, Redact(err.Error())))
 		return anthropic.Usage{}, err

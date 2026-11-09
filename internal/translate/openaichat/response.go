@@ -508,3 +508,74 @@ func (s *Stream) fail(msg string) error {
 	_ = s.sse.Error("api_error", msg)
 	return fmt.Errorf("%s", msg)
 }
+
+// FromOpenAIStream collects a Chat Completions SSE stream (from a provider
+// that streamed although stream=false) into one Anthropic message.
+func FromOpenAIStream(r io.Reader, model string) ([]byte, Usage, error) {
+	st := NewStream(io.Discard, nil, model, 0)
+	var text, reasoning strings.Builder
+	field, id := "", ""
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), 16<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		data, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue
+		}
+		data = strings.TrimSpace(data)
+		if data == "[DONE]" {
+			break
+		}
+		var c oaResponse
+		if json.Unmarshal([]byte(data), &c) != nil {
+			continue
+		}
+		if msg := errorText(c.Error); msg != "" {
+			return nil, Usage{}, fmt.Errorf("provider error: %s", msg)
+		}
+		if id == "" {
+			id = c.ID
+		}
+		if c.Usage != nil {
+			st.usage = c.Usage.toUsage()
+		}
+		for _, ch := range c.Choices {
+			if t, f := ch.Delta.reasoning(); t != "" {
+				reasoning.WriteString(t)
+				field = f
+			}
+			text.WriteString(textOf(ch.Delta.Content))
+			for _, tc := range ch.Delta.ToolCalls {
+				st.toolDelta(tc)
+			}
+			if ch.FinishReason != nil && *ch.FinishReason != "" {
+				st.finish = *ch.FinishReason
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, Usage{}, fmt.Errorf("stream read error: %w", err)
+	}
+	msg := map[string]any{"content": text.String()}
+	if field != "" {
+		msg[field] = reasoning.String()
+	}
+	if len(st.tools) > 0 {
+		calls := make([]map[string]any, 0, len(st.tools))
+		for _, tc := range st.tools {
+			calls = append(calls, map[string]any{"id": tc.ID, "function": map[string]any{"name": tc.Function.Name, "arguments": tc.argText()}})
+		}
+		msg["tool_calls"] = calls
+	}
+	finish := st.finish
+	full, _ := json.Marshal(map[string]any{
+		"id":      id,
+		"choices": []any{map[string]any{"message": msg, "finish_reason": finish}},
+		"usage": map[string]any{
+			"prompt_tokens": st.usage.InputTokens + st.usage.CacheRead, "completion_tokens": st.usage.OutputTokens,
+			"prompt_tokens_details": map[string]any{"cached_tokens": st.usage.CacheRead},
+		},
+	})
+	return FromOpenAI(full, model)
+}
