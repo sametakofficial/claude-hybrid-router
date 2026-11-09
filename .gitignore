@@ -1,31 +1,17 @@
-certs/
+# build output
+/claude-hybrid
+/claude-hybrid.exe
+/claude-hybrid-*
+/opencode-bridge
+/opencode-bridge.exe
+/dist/
+coverage.out
+
+# local tooling / secrets
 .env
 *.log
 .claude/
 .cursor/
 .devcontainer/
 .worktrees/
-
-# Go
-/claude-hybrid
-/claude-hybrid.exe
-/claude-hybrid-*
-/opencode-bridge
-/opencode-bridge.exe
-coverage.out
-SPEC.md
-
-# Research / corpus artifacts (transient, not part of the shipped project)
-/clean_corpus/
-/research_urls/
-
-# musistudio egress runtime artifacts (created by the container on first run)
-/deploy/musistudio-config/logs/
-/deploy/musistudio-config/plugins/
-/deploy/.env
-
-# Musistudio config (API keys)
-deploy/musistudio-config/config.json
-
-# Deleted files
 .deleted/
