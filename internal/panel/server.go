@@ -3,14 +3,11 @@ package panel
 
 import (
 	"crypto/subtle"
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,9 +16,6 @@ import (
 	"github.com/sametakofficial/claude-hybrid-router/internal/stats"
 	"github.com/sametakofficial/claude-hybrid-router/internal/usage"
 )
-
-//go:embed web/index.html
-var webFS embed.FS
 
 // Panel holds what the API needs.
 type Panel struct {
@@ -66,20 +60,7 @@ type handlerFunc func(r *http.Request) (any, error)
 // Handler returns the panel's HTTP handler.
 func (p *Panel) Handler() http.Handler {
 	mux := http.NewServeMux()
-	page, _ := webFS.ReadFile("web/index.html")
-	devDir := os.Getenv("CLAUDE_HYBRID_WEB_DIR") // serve the UI from disk while editing it
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		page := page
-		if devDir != "" {
-			if b, err := os.ReadFile(filepath.Join(devDir, "index.html")); err == nil {
-				page = b
-			}
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Write(page)
-	})
+	mux.Handle("GET /", staticHandler(webFiles()))
 	route := func(pattern string, h handlerFunc) { mux.Handle(pattern, p.api(h)) }
 
 	route("GET /api/status", p.status)
@@ -119,6 +100,7 @@ func (p *Panel) Handler() http.Handler {
 // never approve). With a token set, the token is required as well.
 func (p *Panel) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		securityHeaders(w.Header())
 		token := p.Store.Current().Server.PanelToken
 		if token == "" && !isLoopbackHost(r.Host) {
 			http.Error(w, "claude-hybrid panel: set server.panel_token to allow non-localhost access", http.StatusForbidden)
