@@ -94,7 +94,7 @@ func main() {
 	}
 }
 
-func configPath() string { return filepath.Join(config.Home(), "config.yaml") }
+func configPath() string { return config.Path() }
 func pidPath() string    { return filepath.Join(config.Home(), "serve.pid") }
 
 func loadConfig() (*config.Config, error) {
@@ -207,7 +207,9 @@ func serve() error {
 	errc := make(chan error, 2)
 	go func() { errc <- proxySrv.Serve(proxyLn) }()
 	go func() { errc <- panelSrv.Serve(panelLn) }()
-	go watchConfig(store)
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+	go store.Watch(watchCtx, 2*time.Second, log.Printf)
 
 	log.Printf("claude-hybrid %s: proxy on http://%s, panel on http://%s, config %s",
 		version, cfg.Server.ProxyListen, cfg.Server.PanelListen, store.Path())
@@ -232,24 +234,6 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
-}
-
-// watchConfig reloads the config when the file is edited by hand.
-func watchConfig(store *config.Store) {
-	var last time.Time
-	if fi, err := os.Stat(store.Path()); err == nil {
-		last = fi.ModTime()
-	}
-	for range time.Tick(2 * time.Second) {
-		fi, err := os.Stat(store.Path())
-		if err != nil || !fi.ModTime().After(last) {
-			continue
-		}
-		last = fi.ModTime()
-		if err := store.Reload(); err != nil {
-			log.Printf("config changed on disk but is invalid, keeping the old one: %v", err)
-		}
-	}
 }
 
 // ---- start / stop / status -------------------------------------------------

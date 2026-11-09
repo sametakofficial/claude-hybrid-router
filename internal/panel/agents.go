@@ -16,7 +16,7 @@ type agentView struct {
 }
 
 func (p *Panel) dir() agents.Dir {
-	return agents.Dir{Path: p.Store.Current().Server.AgentsDir, TrashDir: filepath.Join(config.Home(), "trash")}
+	return agents.Dir{Path: p.Store.Current().Server.AgentsDir, TrashDir: config.TrashDir()}
 }
 
 func routeOrDefault(rt config.Route) config.Route {

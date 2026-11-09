@@ -1,12 +1,15 @@
 package config
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenCreatesDefaultAndUpdateValidates(t *testing.T) {
@@ -90,5 +93,71 @@ func TestLoadDropsEmptyRules(t *testing.T) {
 	}
 	if len(c.Rules) != 1 || c.Rules[0].Match != "claude-*" {
 		t.Fatalf("rules: %+v", c.Rules)
+	}
+}
+
+func TestUpdateKeepsHandEditMadeJustBefore(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hand edit: add a provider. Before the fix, a panel save within the
+	// watcher's 2s window wrote the old in-memory config over it.
+	data, _ := os.ReadFile(path)
+	edited := strings.Replace(string(data), "providers: []", "providers:\n  - id: hand\n    base_url: https://h/v1\n    enabled: true", 1)
+	if edited == string(data) {
+		t.Fatalf("test setup: no providers line in\n%s", data)
+	}
+	os.WriteFile(path, []byte(edited), 0o600)
+	if _, err := s.Update(func(c *Config) error { c.Server.Plan = "pro"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := Load(path)
+	if _, ok := c.Provider("hand"); !ok || c.Server.Plan != "pro" {
+		t.Fatalf("hand edit or update lost: %+v", c)
+	}
+	// An invalid hand edit is not overwritten.
+	os.WriteFile(path, []byte("version: 2\nserver: [broken"), 0o600)
+	if _, err := s.Update(func(c *Config) error { return nil }); err == nil {
+		t.Fatal("update over an invalid hand edit must fail")
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "broken") {
+		t.Fatal("invalid hand edit was overwritten")
+	}
+}
+
+func TestWatchReloadsOutsideEditsOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	s, _ := Open(path)
+	logs := make(chan string, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Watch(ctx, 5*time.Millisecond, func(f string, a ...any) { logs <- fmt.Sprintf(f, a...) })
+	s.Update(func(c *Config) error { c.Server.Plan = "max5"; return nil })
+	select {
+	case l := <-logs:
+		t.Fatalf("own write must not trigger a reload: %s", l)
+	case <-time.After(50 * time.Millisecond):
+	}
+	os.WriteFile(path, []byte("version: 2\nserver:\n  plan: max20\n"), 0o600)
+	select {
+	case l := <-logs:
+		if !strings.Contains(l, "reloaded") || s.Current().Server.Plan != "max20" {
+			t.Fatalf("log %q plan %q", l, s.Current().Server.Plan)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("outside edit not reloaded")
+	}
+}
+
+func TestLoadDoesNotCreateTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if c, err := Load(path); err != nil || c.Server.ProxyListen == "" {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("Load must not create config.yaml")
 	}
 }
