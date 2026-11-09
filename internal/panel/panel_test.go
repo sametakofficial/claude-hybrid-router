@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -188,4 +189,9 @@ func TestPanelCannotRedirectTokenOrFiles(t *testing.T) {
 	}))
 	defer srv.Close()
 	do(h, "POST", "/api/discover", `{"id":"gpt","type":"openai","base_url":"`+srv.URL+`","api_key":"sk-…6789"}`, nil)
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }

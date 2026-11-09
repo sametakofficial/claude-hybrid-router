@@ -10,6 +10,9 @@ func (p *Panel) getRaw(*http.Request) (any, error) {
 	cfg := p.Store.Get()
 	for i := range cfg.Providers {
 		cfg.Providers[i].APIKey = maskKey(cfg.Providers[i].APIKey)
+		if len(cfg.Providers[i].Headers) > 0 {
+			cfg.Providers[i].Headers = maskHeaders(cfg.Providers[i].Headers)
+		}
 	}
 	cfg.Server = maskSettings(cfg.Server)
 	data, err := config.Marshal(cfg)
@@ -31,17 +34,21 @@ func (p *Panel) putRaw(r *http.Request) (any, error) {
 		return nil, bad("%v", err)
 	}
 	_, err = p.Store.Update(func(c *config.Config) error {
-		// Masked values mean "unchanged".
+		// Masked values mean "unchanged". A provider that is new (or was
+		// renamed) has no stored secret to fall back on: refuse instead of
+		// saving the mask text as its key.
 		for i, np := range next.Providers {
+			var stored *config.Provider
 			if old, ok := c.Provider(np.ID); ok {
-				next.Providers[i].APIKey = keepKey(np.APIKey, old.APIKey)
-			} else if np.APIKey == maskedToken {
-				next.Providers[i].APIKey = ""
+				stored = &old
 			}
+			pr, dropped := unmaskProvider(np, stored, false)
+			if dropped {
+				return bad("provider %q: api_key or a header holds a masked value but there is no stored value for this id; paste the real value (or use api_key_env)", np.ID)
+			}
+			next.Providers[i] = pr
 		}
-		if next.Server.PanelToken == maskedToken {
-			next.Server.PanelToken = c.Server.PanelToken
-		}
+		next.Server.PanelToken = unmaskToken(next.Server.PanelToken, c.Server.PanelToken)
 		lockFileOnly(&next.Server, c.Server)
 		*c = *next
 		return nil

@@ -89,6 +89,7 @@ func (p *Panel) Handler() http.Handler {
 	route("GET /api/presets", func(*http.Request) (any, error) { return presets, nil })
 	route("GET /api/providers", p.listProviders)
 	route("PUT /api/providers/{id}", p.putProvider)
+	route("PUT /api/providers/{id}/enabled", p.putProviderEnabled)
 	route("DELETE /api/providers/{id}", p.deleteProvider)
 	route("POST /api/providers/{id}/test", p.testProvider)
 	route("POST /api/providers/{id}/refresh", p.refreshModels)

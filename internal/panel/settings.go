@@ -15,9 +15,7 @@ func (p *Panel) putSettings(r *http.Request) (any, error) {
 	var before config.Server
 	cfg, err := p.Store.Update(func(c *config.Config) error {
 		before = c.Server
-		if in.PanelToken == maskedToken || in.PanelToken == "" {
-			in.PanelToken = c.Server.PanelToken
-		}
+		in.PanelToken = unmaskToken(in.PanelToken, c.Server.PanelToken)
 		for _, addr := range []string{in.ProxyListen, in.PanelListen} {
 			if _, _, err := net.SplitHostPort(addr); err != nil {
 				return bad("listen address %q: use host:port", addr)

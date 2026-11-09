@@ -21,12 +21,19 @@ func (p *Panel) listProviders(*http.Request) (any, error) {
 	return out, nil
 }
 
+// providerInput is the body of PUT /api/providers/{id}.
+type providerInput struct {
+	config.Provider
+	ClearAPIKey bool `json:"clear_api_key"` // remove the stored key
+}
+
 func (p *Panel) putProvider(r *http.Request) (any, error) {
 	id := r.PathValue("id")
-	var in config.Provider
-	if err := decode(r, &in); err != nil {
+	var body providerInput
+	if err := decode(r, &body); err != nil {
 		return nil, err
 	}
+	in := body.Provider
 	in.ID = id
 	in.Name = strings.TrimSpace(in.Name)
 	in.BaseURL = strings.TrimRight(strings.TrimSpace(in.BaseURL), "/")
@@ -39,38 +46,67 @@ func (p *Panel) putProvider(r *http.Request) (any, error) {
 		}
 	}
 	in.Models = models
-	if len(in.Headers) == 0 {
-		in.Headers = nil
-	}
 	create := r.URL.Query().Get("create") == "1"
-	if len(in.Models) == 0 {
-		probe := in
-		if old, ok := p.Store.Current().Provider(id); ok && !create {
-			probe.APIKey = keepKey(in.APIKey, old.APIKey)
+	resolve := func(c *config.Config) (config.Provider, int) {
+		for i := range c.Providers {
+			if c.Providers[i].ID == id {
+				pr, _ := unmaskProvider(in, &c.Providers[i], body.ClearAPIKey)
+				return pr, i
+			}
 		}
-		if models, err := p.discover(r.Context(), probe); err == nil {
-			in.Models = models
+		pr, _ := unmaskProvider(in, nil, body.ClearAPIKey)
+		return pr, -1
+	}
+	if len(in.Models) == 0 {
+		if probe, i := resolve(p.Store.Current()); i < 0 || !create {
+			if models, err := p.discover(r.Context(), probe); err == nil {
+				in.Models = models
+			}
 		}
 	}
 	cfg, err := p.Store.Update(func(c *config.Config) error {
-		for i, old := range c.Providers {
-			if old.ID == id {
-				if create {
-					return bad("a provider with id %q already exists", id)
-				}
-				in.APIKey = keepKey(in.APIKey, old.APIKey)
-				c.Providers[i] = in
-				return nil
-			}
+		pr, i := resolve(c)
+		switch {
+		case i >= 0 && create:
+			return bad("a provider with id %q already exists", id)
+		case i >= 0:
+			c.Providers[i] = pr
+		default:
+			c.Providers = append(c.Providers, pr)
 		}
-		if in.APIKey == maskedToken {
-			in.APIKey = ""
-		}
-		c.Providers = append(c.Providers, in)
 		return nil
 	})
 	if err != nil {
 		return nil, bad("%v", err)
+	}
+	saved, _ := cfg.Provider(id)
+	return viewProvider(saved), nil
+}
+
+// putProviderEnabled switches one provider on or off without touching
+// anything else (the UI switch must not resend a stale provider).
+func (p *Panel) putProviderEnabled(r *http.Request) (any, error) {
+	id := r.PathValue("id")
+	var in struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decode(r, &in); err != nil {
+		return nil, err
+	}
+	if in.Enabled == nil {
+		return nil, bad("body must be {\"enabled\": true|false}")
+	}
+	cfg, err := p.Store.Update(func(c *config.Config) error {
+		for i := range c.Providers {
+			if c.Providers[i].ID == id {
+				c.Providers[i].Enabled = *in.Enabled
+				return nil
+			}
+		}
+		return notFound("provider %q not found", id)
+	})
+	if err != nil {
+		return nil, err
 	}
 	saved, _ := cfg.Provider(id)
 	return viewProvider(saved), nil
@@ -123,11 +159,13 @@ func (p *Panel) discoverModels(r *http.Request) (any, error) {
 		return nil, bad("base URL must start with http:// or https://")
 	}
 	if old, ok := p.Store.Current().Provider(in.ID); ok && in.ID != "" && strings.TrimRight(old.BaseURL, "/") == in.BaseURL {
-		// The stored key is only sent to the URL it was saved for.
-		in.APIKey = keepKey(in.APIKey, old.APIKey)
-		in.APIKeyEnv = old.APIKeyEnv
-	} else if in.APIKey == maskedToken || strings.Contains(in.APIKey, "…") {
-		in.APIKey = ""
+		// Stored secrets are only sent to the URL they were saved for.
+		in, _ = unmaskProvider(in, &old, false)
+		if in.APIKeyEnv == "" {
+			in.APIKeyEnv = old.APIKeyEnv
+		}
+	} else {
+		in, _ = unmaskProvider(in, nil, false)
 	}
 	models, err := p.discover(r.Context(), in)
 	if err != nil {
